@@ -1,0 +1,121 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "TI-84 Plus CE Emulator",
+  "projectDescription": "Cross-platform TI-84 Plus CE calculator emulator with Rust core and native Android, iOS, and web apps.",
+  "theme": "aspen",
+  "primaryColor": "#4bd881",
+  "lightColor": "#24262a",
+  "darkColor": "#cecece",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": ["introduction", "quickstart", "architecture"]
+          },
+          {
+            "group": "Platform Integration",
+            "pages": [
+              "platforms/android",
+              "platforms/ios",
+              "platforms/web"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/emulator-core",
+              "concepts/dual-backend",
+              "concepts/memory-map",
+              "concepts/cpu"
+            ]
+          },
+          {
+            "group": "Building",
+            "pages": [
+              "building/prerequisites",
+              "building/unified-build-script",
+              "building/platform-specific"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/debugging",
+              "advanced/testing",
+              "advanced/rom-loading",
+              "advanced/cemu-parity"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "C API",
+            "pages": [
+              "api/c-api-overview",
+              "api/lifecycle",
+              "api/rom-management",
+              "api/execution",
+              "api/display",
+              "api/input",
+              "api/state"
+            ]
+          },
+          {
+            "group": "Rust API",
+            "pages": [
+              "api/rust-overview",
+              "api/emu-struct",
+              "api/memory",
+              "api/cpu-module",
+              "api/peripherals"
+            ]
+          },
+          {
+            "group": "WASM API",
+            "pages": [
+              "api/wasm-bindings",
+              "api/backend-interface"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Cross-platform Rust emulator core with C ABI",
+    "Native Android app (Kotlin + Jetpack Compose)",
+    "Native iOS app (Swift + SwiftUI)",
+    "Web app (React + TypeScript + WASM)",
+    "Dual backend design (Rust + CEmu reference)",
+    "Full eZ80 CPU emulation with ADL mode",
+    "320x240 LCD with 16-bit color",
+    "Cycle-accurate peripheral emulation",
+    "Save/restore state support",
+    "TI-84 CE program loading (.8xp/.8xv)"
+  ],
+  "publicApiSurface": [
+    "emu_create() - Create emulator instance",
+    "emu_destroy() - Destroy emulator",
+    "emu_load_rom() - Load ROM data",
+    "emu_send_file() - Inject .8xp/.8xv files",
+    "emu_power_on() - Start emulation",
+    "emu_run_cycles() - Execute cycles",
+    "emu_framebuffer() - Get display buffer",
+    "emu_set_key() - Handle input",
+    "emu_save_state() - Serialize state",
+    "emu_load_state() - Deserialize state",
+    "emu_is_lcd_on() - Check LCD status",
+    "emu_get_backlight() - Get brightness",
+    "emu_reset() - Reset emulator",
+    "Emu::new() - Rust constructor",
+    "Emu::load_rom() - Rust ROM loading",
+    "Emu::run_cycles() - Rust execution",
+    "EmulatorBackend - TypeScript interface"
+  ]
+}
