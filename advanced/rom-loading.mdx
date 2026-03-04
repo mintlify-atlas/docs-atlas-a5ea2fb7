@@ -1,0 +1,230 @@
+---
+title: ROM Loading
+description: Loading .8xp and .8xv programs into the calculator's flash archive
+---
+
+The emulator supports loading TI-84 CE programs (`.8xp`) and AppVars (`.8xv`) into the calculator's flash archive.
+
+## Overview
+
+There are two ways to load programs:
+
+1. **sendfile** - Inject files and run immediately (for testing)
+2. **bakerom** - Create a pre-loaded ROM (for distribution)
+
+## sendfile Command
+
+Loads the ROM, injects files into flash, boots the emulator, and saves a screenshot. Useful for quick testing.
+
+### Usage
+
+```bash
+cd core
+
+# Inject a single program
+cargo run --release --example debug -- sendfile DOOM.8xp
+
+# Inject a program with its required C libraries
+cargo run --release --example debug -- sendfile DOOM.8xp clibs/*.8xv
+```
+
+### What It Does
+
+1. Loads the ROM from `TI-84 CE.rom`
+2. Injects specified `.8xp`/`.8xv` files into flash archive
+3. Boots the emulator to completion
+4. Saves a screenshot to `screen.png`
+
+### Example: Loading DOOM
+
+```bash
+# DOOM requires CE C toolchain libraries
+cargo run --release --example debug -- sendfile DOOM.8xp \
+  clibs/libload.8xv \
+  clibs/graphx.8xv \
+  clibs/keypadc.8xv \
+  clibs/fileioc.8xv
+```
+
+After injection, the program appears in the TI-OS program menu.
+
+## bakerom Command
+
+Creates a new ROM file with programs pre-installed in the flash archive. The output ROM can be loaded directly and programs will appear in TI-OS without needing to inject files each time.
+
+### Usage
+
+```bash
+cd core
+
+# Bake a ROM with DOOM pre-installed
+cargo run --release --example debug -- bakerom doom.rom DOOM.8xp clibs/*.8xv
+```
+
+### What It Does
+
+1. Loads the original ROM from `TI-84 CE.rom`
+2. Injects specified `.8xp`/`.8xv` files into flash archive
+3. Writes the modified ROM to the output file
+
+### Using a Baked ROM
+
+```bash
+# Test the baked ROM
+cargo run --release --example debug -- boot  # (with doom.rom as your ROM)
+```
+
+The baked ROM can be:
+- Loaded in the mobile/web apps
+- Shared with others (ROM + programs bundled)
+- Used for testing without repeated injection
+
+### Example: Creating a Game ROM
+
+```bash
+# Bake a ROM with multiple games
+cargo run --release --example debug -- bakerom games.rom \
+  DOOM.8xp \
+  SNAKE.8xp \
+  TETRIS.8xp \
+  clibs/*.8xv
+```
+
+## CE C Toolchain Libraries
+
+Programs built with the [CE C toolchain](https://github.com/CE-Programming/toolchain) require their library `.8xv` files to be included.
+
+### Common Libraries
+
+| Library      | Description                        |
+|--------------|------------------------------------|
+| libload.8xv  | Dynamic library loader             |
+| graphx.8xv   | Graphics library (sprites, colors) |
+| keypadc.8xv  | Keyboard input                     |
+| fileioc.8xv  | File I/O operations                |
+
+### Example: Loading a graphx Game
+
+```bash
+# Most graphx games need at least these libraries
+cargo run --release --example debug -- sendfile GAME.8xp \
+  graphx.8xv \
+  keypadc.8xv \
+  libload.8xv
+```
+
+### Where to Get Libraries
+
+The CE C toolchain libraries are typically included with games that require them. You can also:
+
+1. **Extract from a real calculator** - Transfer `.8xv` files from a TI-84 Plus CE
+2. **Build from source** - Clone the [CE C toolchain](https://github.com/CE-Programming/toolchain) and build
+3. **Download with games** - Many games bundle required libraries
+
+## Loading from Apps
+
+The mobile and web apps provide file pickers for loading programs.
+
+### Web App
+
+1. Click the file picker button
+2. Select `.8xp` or `.8xv` files
+3. Files are injected into flash archive
+4. Reset the calculator to see programs in menu
+
+### Android/iOS
+
+1. Use the file picker in the app menu
+2. Select program files from device storage
+3. Files are injected and available after reset
+
+### Keyboard Shortcut (Web)
+
+- **Ctrl+R / Cmd+R** - Resend last program file
+
+Useful for rapid testing during development.
+
+## Program File Formats
+
+### .8xp Files
+
+TI-84 Plus CE program files:
+- Contains Z80/eZ80 assembly code or TI-BASIC
+- Stored in flash archive
+- Executable from TI-OS program menu
+
+### .8xv Files
+
+TI-84 Plus CE AppVar (application variable) files:
+- Contains data or library code
+- Used by CE C toolchain for shared libraries
+- Referenced by programs at runtime
+
+## Flash Archive Structure
+
+Programs are stored in the calculator's flash archive:
+
+- **Location:** Flash sectors starting at specific addresses
+- **Format:** TI variable table with metadata (name, type, size)
+- **Persistence:** Programs persist across resets (unless flash is erased)
+
+### Archive Sectors
+
+The TI-84 Plus CE flash is divided into sectors:
+- **Sector 0** - Boot code (protected)
+- **Sectors 1-63** - Flash archive (writable)
+
+## Advanced: run Command
+
+Run a program headless with debug output capture:
+
+```bash
+cargo run --release --example debug -- run PROGRAM.8xp [lib.8xv ...] \
+  [--timeout <secs>] [--speed <multiplier>]
+```
+
+### Options
+
+- `--timeout <secs>` - Timeout in seconds (default: 30)
+- `--speed <multiplier>` - Speed multiplier (1=real-time, default: unthrottled)
+
+### What It Does
+
+1. Boots TI-OS
+2. Injects files
+3. Launches program via `Asm(prgm<NAME>)`
+4. Captures CE toolchain debug output (port 0xFB0000) to stdout
+5. Terminates on null sentinel, timeout, or power-off
+
+### Example
+
+```bash
+# Run a test program with 60 second timeout
+cargo run --release --example debug -- run TEST.8xp --timeout 60
+```
+
+## Troubleshooting
+
+### Program Doesn't Appear in Menu
+
+- **Reset the calculator** - Programs appear after boot
+- **Check file size** - Large programs may not fit in archive
+- **Verify file format** - Must be valid `.8xp`/`.8xv` file
+
+### Program Crashes on Launch
+
+- **Missing libraries** - Include all required `.8xv` files
+- **Incompatible ROM** - Some programs require specific OS versions
+- **Memory corruption** - Try baking a fresh ROM
+
+### "Error: Archived" Message
+
+- **Program is archived** - TI-OS shows this for archived programs
+- **Unarchive in TI-OS** - Use `2nd+Mem` → `Mem Mgmt` → `Unarchive`
+- Or run directly with `Asm(` command
+
+## See Also
+
+- [Debugging Tools](/advanced/debugging) - Testing loaded programs
+- [Testing](/advanced/testing) - Verifying program behavior
+- [CE C Toolchain](https://github.com/CE-Programming/toolchain) - Building programs

@@ -1,0 +1,492 @@
+---
+title: CPU Module
+description: eZ80 CPU implementation with 24-bit addressing and instruction execution
+---
+
+The `cpu` module implements the Zilog eZ80 processor, a Z80-compatible CPU with extended 24-bit addressing. The TI-84 Plus CE runs at up to 48 MHz in ADL (Address Data Long) mode.
+
+## CPU Architecture
+
+The eZ80 is an enhanced Z80 with:
+
+- **24-bit address space**: 16MB addressable memory
+- **Extended registers**: BC, DE, HL, IX, IY, SP can be 24-bit
+- **ADL mode**: Full 24-bit addressing (vs. Z80 compatibility mode)
+- **~600 opcodes**: Standard Z80 + eZ80-specific instructions
+- **Cycle-accurate timing**: Matches CEmu reference implementation
+
+## CPU Struct
+
+The `Cpu` struct represents the CPU state:
+
+```rust
+pub struct Cpu {
+    // Main registers
+    pub a: u8,      // Accumulator (8-bit)
+    pub f: u8,      // Flags register (8-bit)
+    pub bc: u32,    // BC register pair (24-bit in ADL)
+    pub de: u32,    // DE register pair (24-bit in ADL)
+    pub hl: u32,    // HL register pair (24-bit in ADL)
+    
+    // Shadow registers
+    pub a_prime: u8,
+    pub f_prime: u8,
+    pub bc_prime: u32,
+    pub de_prime: u32,
+    pub hl_prime: u32,
+    
+    // Index registers
+    pub ix: u32,    // IX index register (24-bit in ADL)
+    pub iy: u32,    // IY index register (24-bit in ADL)
+    
+    // Special registers
+    pub sps: u32,   // Stack pointer (Z80 mode, 16-bit)
+    pub spl: u32,   // Stack pointer (ADL mode, 24-bit)
+    pub pc: u32,    // Program counter (24-bit)
+    pub i: u16,     // Interrupt vector base
+    pub r: u8,      // Refresh register
+    pub mbase: u8,  // Memory base (for Z80 mode)
+    
+    // State flags
+    pub iff1: bool, // Interrupt enable flip-flop 1
+    pub iff2: bool, // Interrupt enable flip-flop 2
+    pub im: InterruptMode,
+    pub adl: bool,  // ADL mode flag (true = 24-bit)
+    pub halted: bool,
+    
+    // ... internal state
+}
+```
+
+## Creating a CPU
+
+```rust
+use ti84ce_core::cpu::Cpu;
+use ti84ce_core::bus::Bus;
+
+let mut cpu = Cpu::new();
+let mut bus = Bus::new();
+
+// Initialize prefetch buffer (required after reset)
+cpu.init_prefetch(&mut bus);
+```
+
+### Reset State
+
+After `new()` or `reset()`, the CPU is in Z80 compatibility mode:
+
+- `pc = 0x000000` (boot vector)
+- `adl = false` (Z80 mode, 16-bit addresses)
+- `iff1 = false`, `iff2 = false` (interrupts disabled)
+- `im = InterruptMode::Mode0`
+- All registers zeroed
+
+The ROM typically enables ADL mode early in boot:
+
+```asm
+.assume adl=1  ; Switch to ADL mode
+ld sp, 0xD1A87E ; Set 24-bit stack pointer
+```
+
+## Register Access
+
+### 8-bit Registers
+
+```rust
+cpu.a = 0x42;    // Set accumulator
+let a = cpu.a;   // Read accumulator
+
+cpu.f = 0x00;    // Set flags
+let f = cpu.f;   // Read flags
+```
+
+### 16/24-bit Register Pairs
+
+```rust
+// In ADL mode (24-bit)
+cpu.adl = true;
+cpu.bc = 0xD10000; // 24-bit value
+
+// In Z80 mode (16-bit)
+cpu.adl = false;
+cpu.bc = 0x1234; // Only 16 bits used
+```
+
+### Stack Pointer
+
+The CPU has two stack pointers:
+
+```rust
+// Active SP depends on L mode (data addressing mode)
+let sp = cpu.sp();      // Returns spl if L=true, sps if L=false
+cpu.set_sp(0xD1A87E);   // Sets spl or sps based on L
+
+// Set both for convenience
+cpu.set_sp_both(0xD1A87E);
+```
+
+<Note>
+The `L` mode is set to `ADL` at the start of each instruction and can be overridden by suffix opcodes (`.SIS`, `.LIS`, `.SIL`, `.LIL`).
+</Note>
+
+## Flags Register
+
+The `F` register contains condition flags:
+
+```rust
+use ti84ce_core::cpu::flags::*;
+
+// Set flags
+cpu.f |= FLAG_CARRY;   // Set carry flag
+cpu.f |= FLAG_ZERO;    // Set zero flag
+cpu.f &= !FLAG_SIGN;   // Clear sign flag
+
+// Check flags
+if cpu.f & FLAG_CARRY != 0 {
+    println!("Carry set");
+}
+```
+
+### Flag Bits
+
+```rust
+pub mod flags {
+    pub const FLAG_CARRY: u8     = 0x01; // Bit 0: Carry
+    pub const FLAG_ADD_SUB: u8   = 0x02; // Bit 1: Add/Subtract
+    pub const FLAG_PARITY: u8    = 0x04; // Bit 2: Parity/Overflow
+    pub const FLAG_OVERFLOW: u8  = 0x04; // Alias for parity
+    pub const FLAG_X: u8         = 0x08; // Bit 3: Undocumented
+    pub const FLAG_HALF_CARRY: u8= 0x10; // Bit 4: Half carry
+    pub const FLAG_Y: u8         = 0x20; // Bit 5: Undocumented
+    pub const FLAG_ZERO: u8      = 0x40; // Bit 6: Zero
+    pub const FLAG_SIGN: u8      = 0x80; // Bit 7: Sign
+}
+```
+
+## Instruction Execution
+
+The CPU executes instructions via `step()`:
+
+```rust
+let mut cpu = Cpu::new();
+let mut bus = Bus::new();
+
+// Load ROM
+let rom = std::fs::read("TI-84 CE.rom")?;
+bus.load_rom(&rom)?;
+cpu.init_prefetch(&mut bus);
+
+// Execute one instruction
+let cycles = cpu.step(&mut bus);
+println!("Executed {} cycles", cycles);
+```
+
+### Execution Flow
+
+1. **Check interrupts**: NMI, then IRQ (if enabled)
+2. **Check HALT**: If halted, add 1 cycle and return
+3. **Fetch opcode**: Read byte at PC
+4. **Decode**: Determine instruction from opcode
+5. **Execute**: Perform operation, update registers
+6. **Return cycles**: Actual bus cycles used (includes memory timing)
+
+### Cycle Counting
+
+The `step()` method returns the actual cycles used, which includes:
+
+- **Internal CPU cycles**: ALU operations, register moves
+- **Memory access cycles**: Flash wait states, RAM timing
+- **Peripheral I/O cycles**: Port read/write overhead
+
+```rust
+let start = bus.total_cycles();
+let cycles = cpu.step(&mut bus);
+let end = bus.total_cycles();
+assert_eq!(cycles, (end - start) as u32);
+```
+
+## Interrupts
+
+The eZ80 supports two types of interrupts:
+
+### Non-Maskable Interrupt (NMI)
+
+```rust
+cpu.nmi_pending = true;
+let cycles = cpu.step(&mut bus);
+// CPU jumps to 0x0066, pushes PC to stack
+```
+
+NMI handling:
+- Cannot be disabled
+- Saves PC to stack
+- Sets `iff2 = iff1`, then clears `iff1`
+- Jumps to vector 0x0066
+
+### Maskable Interrupt (IRQ)
+
+```rust
+cpu.irq_pending = true;
+cpu.iff1 = true; // Must be enabled
+let cycles = cpu.step(&mut bus);
+// CPU calls interrupt handler
+```
+
+IRQ handling (depends on interrupt mode):
+
+```rust
+pub enum InterruptMode {
+    Mode0, // Execute instruction from data bus (not implemented)
+    Mode1, // Call to fixed address 0x0038
+    Mode2, // Vectored interrupt using I register
+}
+```
+
+For Mode 1 (TI-84 Plus CE uses this):
+- Checks `iff1` (must be true)
+- Clears `iff1` (disables further interrupts)
+- Saves PC to stack
+- Jumps to 0x0038
+
+### EI Delay
+
+The `EI` instruction enables interrupts after the **next** instruction:
+
+```asm
+ei          ; Sets ei_delay = 2
+ret         ; Executes with iff1=false (delay=1)
+            ; After RET, iff1=true (delay=0)
+```
+
+This allows critical code to execute atomically:
+
+```asm
+ei
+reti        ; Returns from interrupt handler with iff1=true
+```
+
+## ADL Mode and Suffixes
+
+The eZ80 supports per-instruction addressing mode control:
+
+### ADL Mode
+
+```rust
+cpu.adl = true; // 24-bit addresses (default for TI-84 CE)
+cpu.adl = false; // 16-bit addresses (Z80 compatibility)
+```
+
+ADL affects:
+- **Register width**: BC, DE, HL, IX, IY, SP are 24-bit vs. 16-bit
+- **Stack operations**: PUSH/POP 3 bytes vs. 2 bytes
+- **Addressing**: Memory accesses use full 24-bit vs. MBASE+16-bit
+
+### Suffix Opcodes
+
+Suffix opcodes modify the next instruction's addressing modes:
+
+```asm
+.SIS    ; 0x40: Set L=0, IL=0 (short data, short instruction)
+.LIS    ; 0x49: Set L=1, IL=0 (long data, short instruction)
+.SIL    ; 0x52: Set L=0, IL=1 (short data, long instruction)
+.LIL    ; 0x5B: Set L=1, IL=1 (long data, long instruction)
+```
+
+- **L**: Data addressing mode (0=16-bit, 1=24-bit)
+- **IL**: Instruction/index addressing mode (0=16-bit, 1=24-bit)
+
+<Note>
+Suffix opcodes are not separate instructions in the Rust implementation—they're handled atomically with the following instruction.
+</Note>
+
+## Special Instructions
+
+The eZ80 adds several Z80-incompatible instructions:
+
+### LEA (Load Effective Address)
+
+```asm
+lea hl, ix+10    ; HL = IX + 10 (no memory access)
+lea de, iy-5     ; DE = IY - 5
+```
+
+Implemented as opcode `ED 22/23`.
+
+### MLT (Multiply)
+
+```asm
+mlt bc    ; BC = B * C (unsigned 8×8→16)
+mlt de    ; DE = D * E
+mlt hl    ; HL = H * L
+mlt sp    ; SP = SPH * SPL
+```
+
+Implemented as opcode `ED 4C/5C/6C/7C`.
+
+### PEA (Push Effective Address)
+
+```asm
+pea ix+10    ; Push (IX + 10) to stack
+pea iy-5     ; Push (IY - 5) to stack
+```
+
+### TST (Test)
+
+```asm
+tst a        ; Set flags based on A (like CP A, 0)
+tst (hl)     ; Set flags based on (HL)
+```
+
+### LD A, MB / LD MB, A
+
+```asm
+ld a, mb     ; A = MBASE (memory base register)
+ld mb, a     ; MBASE = A
+```
+
+Implemented as opcode `ED 6E` / `ED 6F`.
+
+## Execution Tracing
+
+The CPU supports detailed execution tracing for debugging:
+
+```rust
+use ti84ce_core::emu::{StepInfo, enable_inst_trace};
+
+// Enable instruction trace (limit to 1000 instructions)
+enable_inst_trace(1000);
+
+let step_info = emu.step_cpu(); // Returns StepInfo
+println!("PC: {:06X}, Opcode: {:02X}, Cycles: {}", 
+    step_info.pc, step_info.opcode[0], step_info.cycles);
+```
+
+### StepInfo Structure
+
+```rust
+pub struct StepInfo {
+    pub pc: u32,              // PC before execution
+    pub sp: u32,              // SP before execution
+    pub a: u8,                // A before execution
+    pub f: u8,                // F before execution
+    pub bc: u32,              // BC before execution
+    pub de: u32,              // DE before execution
+    pub hl: u32,              // HL before execution
+    pub ix: u32,              // IX before execution
+    pub iy: u32,              // IY before execution
+    pub adl: bool,            // ADL mode
+    pub iff1: bool,           // IFF1
+    pub iff2: bool,           // IFF2
+    pub im: InterruptMode,    // Interrupt mode
+    pub halted: bool,         // Was halted
+    pub opcode: [u8; 4],      // Opcode bytes
+    pub opcode_len: usize,    // Valid opcode bytes
+    pub cycles: u32,          // Cycles used
+    pub total_cycles: u64,    // Total cycles after
+    pub io_ops: Vec<IoRecord>, // I/O operations
+}
+```
+
+This matches CEmu's trace format for parity testing.
+
+## State Persistence
+
+The CPU state can be saved/restored:
+
+```rust
+// Save state
+let snapshot = cpu.to_bytes();
+std::fs::write("cpu.state", &snapshot)?;
+
+// Load state
+let data = std::fs::read("cpu.state")?;
+cpu.from_bytes(&data)?;
+```
+
+Snapshot size: `Cpu::SNAPSHOT_SIZE` (67 bytes)
+
+## Usage Example
+
+Complete example showing CPU usage:
+
+```rust
+use ti84ce_core::{Cpu, Bus};
+use std::fs;
+
+let mut cpu = Cpu::new();
+let mut bus = Bus::new();
+
+// Load ROM
+let rom = fs::read("TI-84 CE.rom")?;
+bus.load_rom(&rom)?;
+
+// Initialize prefetch
+cpu.reset();
+cpu.init_prefetch(&mut bus);
+
+// Enable interrupts
+cpu.iff1 = true;
+cpu.iff2 = true;
+cpu.im = InterruptMode::Mode1;
+
+// Execute instructions
+for _ in 0..1000 {
+    let cycles = cpu.step(&mut bus);
+    println!("PC: {:06X}, Cycles: {}", cpu.pc, cycles);
+    
+    if cpu.halted {
+        println!("CPU halted at {:06X}", cpu.pc);
+        break;
+    }
+}
+```
+
+## Public Methods
+
+### Core Methods
+
+```rust
+impl Cpu {
+    pub fn new() -> Self;
+    pub fn reset(&mut self);
+    pub fn init_prefetch(&mut self, bus: &mut Bus);
+    pub fn step(&mut self, bus: &mut Bus) -> u32;
+}
+```
+
+### Register Access
+
+```rust
+impl Cpu {
+    pub fn sp(&self) -> u32;
+    pub fn set_sp(&mut self, val: u32);
+    pub fn set_sp_both(&mut self, val: u32);
+}
+```
+
+### State Persistence
+
+```rust
+impl Cpu {
+    const SNAPSHOT_SIZE: usize;
+    pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE];
+    pub fn from_bytes(&mut self, buf: &[u8]) -> Result<(), i32>;
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Memory Types" icon="memory" href="/api/memory">
+    Learn how the CPU accesses memory
+  </Card>
+  <Card title="Bus Module" icon="diagram-project" href="/api/bus-module">
+    Understand memory routing and I/O
+  </Card>
+  <Card title="Peripherals" icon="keyboard" href="/api/peripherals">
+    Explore peripheral interrupt sources
+  </Card>
+  <Card title="Testing" icon="vial" href="/development/testing">
+    Test CPU with trace comparison
+  </Card>
+</CardGroup>

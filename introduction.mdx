@@ -1,0 +1,217 @@
+---
+title: TI-84 Plus CE Emulator Documentation
+description: Cross-platform calculator emulator with native Android, iOS, and web apps
+mode: custom
+---
+
+<div className="relative overflow-hidden bg-gradient-to-br from-[#121212] via-[#1a1a1a] to-[#0a0a0a] dark:from-[#121212] dark:via-[#1a1a1a] dark:to-[#0a0a0a]">
+  <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px]"></div>
+  
+  <div className="relative max-w-7xl mx-auto px-6 py-20 lg:py-24">
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+      <div className="lg:col-span-7">
+        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white dark:text-white mb-6">
+          TI-84 Plus CE Emulator
+        </h1>
+        <p className="text-lg sm:text-xl text-gray-300 dark:text-gray-300 max-w-2xl mb-8">
+          Cross-platform emulator with a Rust core and native apps for Android, iOS, and web. Build calculator applications with cycle-accurate hardware emulation.
+        </p>
+        <div className="flex flex-wrap gap-4">
+          <a 
+            href="/quickstart" 
+            className="inline-flex items-center px-6 py-3 rounded-lg bg-[#4bd881] hover:bg-[#3bc771] text-black font-semibold transition-colors no-underline"
+          >
+            Get Started
+            <svg className="ml-2 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+            </svg>
+          </a>
+          <a 
+            href="/api/c-api-overview" 
+            className="inline-flex items-center px-6 py-3 rounded-lg border border-white/30 bg-white/10 hover:bg-white/20 hover:border-[#4bd881] text-white font-semibold transition-colors no-underline"
+          >
+            API Reference
+          </a>
+        </div>
+      </div>
+      
+      <div className="lg:col-span-5">
+        <div className="relative">
+          <div className="absolute inset-0 bg-[#4bd881]/20 blur-3xl rounded-full"></div>
+          <img 
+            src="https://github.com/user-attachments/assets/33e55f96-a156-415c-9aed-01f312d3d6c1" 
+            alt="TI-84 CE Emulator running on multiple platforms"
+            className="relative rounded-2xl shadow-2xl w-full h-auto"
+            noZoom
+          />
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Quick Start</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">Get the emulator running in minutes</p>
+  
+  <Steps>
+    <Step title="Install Rust toolchain">
+      Install Rust and the target for your platform:
+      
+      ```bash
+      # Install Rust
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+      
+      # Add platform targets
+      rustup target add aarch64-linux-android    # Android
+      rustup target add aarch64-apple-ios        # iOS
+      rustup target add wasm32-unknown-unknown   # Web
+      ```
+    </Step>
+    
+    <Step title="Clone the repository">
+      Get the source code and build the emulator core:
+      
+      ```bash
+      git clone https://github.com/hunterchen7/ti84ce.git
+      cd ti84ce
+      cd core && cargo build --release
+      ```
+    </Step>
+    
+    <Step title="Build for your platform">
+      Use the unified build script to compile for your target:
+      
+      <CodeGroup>
+        ```bash Android
+        ./scripts/build.sh android --install
+        ```
+        
+        ```bash iOS
+        ./scripts/build.sh ios --sim
+        open ios/Calc.xcodeproj
+        ```
+        
+        ```bash Web
+        make web-dev
+        # Visit http://localhost:5173
+        ```
+      </CodeGroup>
+      
+      <Note>For iOS, the build script compiles the backend library. Open Xcode to build and run the app.</Note>
+    </Step>
+    
+    <Step title="Load a ROM and run">
+      You need a TI-84 Plus CE ROM file (legally obtained). Import it through the app's file picker, then press Run to start emulation.
+      
+      <Tip>The emulator supports loading `.8xp` (programs) and `.8xv` (AppVars) files into the calculator's flash archive.</Tip>
+    </Step>
+  </Steps>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Explore by Topic</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">Dive into platform integration, core concepts, and advanced features</p>
+  
+  <CardGroup cols={3}>
+    <Card title="Platform Integration" icon="mobile-screen" href="/platforms/android">
+      Build native apps for Android, iOS, and web using the emulator core
+    </Card>
+    <Card title="Architecture" icon="diagram-project" href="/architecture">
+      Understand the dual-backend design and emulator structure
+    </Card>
+    <Card title="Building" icon="hammer" href="/building/prerequisites">
+      Set up your development environment and compile for all platforms
+    </Card>
+    <Card title="C API" icon="c" href="/api/c-api-overview">
+      Thread-safe C ABI for embedding the emulator in any application
+    </Card>
+    <Card title="Rust API" icon="rust" href="/api/rust-overview">
+      Native Rust modules for CPU, memory, peripherals, and scheduling
+    </Card>
+    <Card title="WASM API" icon="globe" href="/api/wasm-bindings">
+      JavaScript bindings for running the emulator in the browser
+    </Card>
+  </CardGroup>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Key Features</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">What makes this emulator unique</p>
+  
+  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <div className="p-6 rounded-2xl border border-gray-200 dark:border-[#2e2e2e] bg-gray-50 dark:bg-[#1a1a1a]">
+      <div className="flex items-center gap-3 mb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#4bd881]/10 flex items-center justify-center">
+          <svg className="w-6 h-6 text-[#4bd881]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+        </div>
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Dual Backend Design</h3>
+      </div>
+      <p className="text-sm text-gray-600 dark:text-gray-400">
+        Switch between the Rust core and CEmu reference at build time. Use CEmu for parity testing and debugging while developing the Rust implementation.
+      </p>
+    </div>
+    
+    <div className="p-6 rounded-2xl border border-gray-200 dark:border-[#2e2e2e] bg-gray-50 dark:bg-[#1a1a1a]">
+      <div className="flex items-center gap-3 mb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#4bd881]/10 flex items-center justify-center">
+          <svg className="w-6 h-6 text-[#4bd881]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+          </svg>
+        </div>
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Full eZ80 CPU Emulation</h3>
+      </div>
+      <p className="text-sm text-gray-600 dark:text-gray-400">
+        Complete instruction set with ADL mode for 24-bit addressing. Cycle-accurate execution matches the TI-84 CE hardware.
+      </p>
+    </div>
+    
+    <div className="p-6 rounded-2xl border border-gray-200 dark:border-[#2e2e2e] bg-gray-50 dark:bg-[#1a1a1a]">
+      <div className="flex items-center gap-3 mb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#4bd881]/10 flex items-center justify-center">
+          <svg className="w-6 h-6 text-[#4bd881]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
+          </svg>
+        </div>
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">320×240 LCD with 16-bit Color</h3>
+      </div>
+      <p className="text-sm text-gray-600 dark:text-gray-400">
+        Full color display emulation with palette support and DMA engine. Renders at 60 FPS on all platforms.
+      </p>
+    </div>
+    
+    <div className="p-6 rounded-2xl border border-gray-200 dark:border-[#2e2e2e] bg-gray-50 dark:bg-[#1a1a1a]">
+      <div className="flex items-center gap-3 mb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#4bd881]/10 flex items-center justify-center">
+          <svg className="w-6 h-6 text-[#4bd881]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+          </svg>
+        </div>
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Save/Restore State</h3>
+      </div>
+      <p className="text-sm text-gray-600 dark:text-gray-400">
+        Serialize and deserialize the entire emulator state including RAM, flash, CPU registers, and peripherals.
+      </p>
+    </div>
+  </div>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="rounded-2xl border border-gray-200 dark:border-[#2e2e2e] bg-gradient-to-br from-gray-50 to-white dark:from-[#1a1a1a] dark:to-[#121212] p-8 sm:p-12">
+    <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white mb-4">Ready to build calculator apps?</h2>
+    <p className="text-base text-gray-600 dark:text-gray-400 mb-6 max-w-2xl">
+      Integrate the emulator into your Android, iOS, or web project. The C API provides a stable interface for all platforms.
+    </p>
+    <a 
+      href="/quickstart" 
+      className="inline-flex items-center px-6 py-3 rounded-lg bg-[#4bd881] hover:bg-[#3bc771] text-black font-semibold transition-colors no-underline"
+    >
+      Get Started
+      <svg className="ml-2 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+      </svg>
+    </a>
+  </div>
+</div>

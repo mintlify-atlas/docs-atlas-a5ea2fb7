@@ -1,0 +1,214 @@
+---
+title: Rust API Overview
+description: Overview of the TI-84 Plus CE emulator Rust module structure and crate organization
+---
+
+The emulator core is implemented as a Rust crate (`core/`) with a stable C FFI for cross-platform integration. This page provides an overview of the module structure and key architectural concepts.
+
+## Crate Organization
+
+The emulator is organized into several modules, each responsible for a specific aspect of the TI-84 Plus CE hardware:
+
+```rust
+pub mod memory;      // Flash, RAM, and memory map
+pub mod bus;         // Address decoding and memory access routing
+pub mod cpu;         // eZ80 CPU implementation
+pub mod peripherals; // Hardware controllers (LCD, timers, keypad, etc.)
+pub mod scheduler;   // Event scheduling for timed peripherals
+pub mod disasm;      // Instruction disassembler
+pub mod ti_file;     // .8xp/.8xv file parser
+mod emu;             // Main emulator orchestrator
+```
+
+### Module Hierarchy
+
+<CodeGroup>
+```rust core/src/lib.rs
+//! TI-84 Plus CE Emulator Core
+//!
+//! This crate provides a platform-agnostic emulator core with a stable C ABI.
+//! No OS APIs are used - all I/O is done through byte buffers.
+
+pub mod memory;
+pub mod bus;
+pub mod cpu;
+pub mod peripherals;
+pub mod scheduler;
+pub mod disasm;
+pub mod ti_file;
+mod emu;
+
+pub use emu::{Emu, LcdSnapshot, TimerSnapshot, StepInfo};
+pub use bus::{IoTarget, IoOpType, IoRecord};
+pub use disasm::{disassemble, DisasmResult};
+```
+</CodeGroup>
+
+## Memory Map
+
+The TI-84 Plus CE uses the eZ80's 24-bit address space:
+
+| Address Range       | Region              | Module        |
+|---------------------|---------------------|---------------|
+| 0x000000 - 0x3FFFFF | Flash (4MB)         | `memory`      |
+| 0x400000 - 0xCFFFFF | Unmapped            | —             |
+| 0xD00000 - 0xD657FF | RAM + VRAM          | `memory`      |
+| 0xD65800 - 0xDFFFFF | Unmapped            | —             |
+| 0xE00000 - 0xFFFFFF | Memory-mapped I/O   | `peripherals` |
+
+### Memory Module
+
+The `memory` module provides:
+- **Flash**: 4MB NOR flash for OS and user programs
+- **RAM**: 256KB user RAM + ~150KB VRAM
+- **Address constants**: `addr::FLASH_START`, `addr::RAM_START`, etc.
+
+See [Memory Types](/api/memory) for detailed memory subsystem documentation.
+
+### Bus Module
+
+The `bus` module handles:
+- Address decoding and routing
+- Memory access cycle timing
+- I/O port mapping
+- Memory protection and NMI violations
+
+## CPU Module
+
+The `cpu` module implements the Zilog eZ80 processor:
+
+- **24-bit addressing**: Full eZ80 ADL (Address Data Long) mode support
+- **Register set**: A, F, BC, DE, HL, IX, IY, SP (with shadow registers)
+- **Instruction execution**: ~600 opcodes including eZ80-specific instructions
+- **Interrupt handling**: Maskable (IRQ) and non-maskable (NMI) interrupts
+- **Cycle-accurate timing**: Matches CEmu reference implementation
+
+See [CPU Module](/api/cpu-module) for detailed CPU documentation.
+
+## Peripherals Module
+
+The `peripherals` module contains all memory-mapped hardware controllers:
+
+### Core Peripherals
+
+- **Control Ports** (0xE00000, 0xFF0000): Power, CPU speed, device configuration
+- **Flash Controller** (0xE10000): Flash memory control and wait states
+- **Interrupt Controller** (0xF00000): Hardware interrupt routing
+- **LCD Controller** (0xE30000): Display timing, DMA, palette
+- **General Timers** (0xF20000): Three 32-bit timers with match/overflow
+- **Keypad Controller** (0xF50000): 8×8 key matrix scanner
+- **Watchdog Timer** (0xF60000): System watchdog
+- **RTC** (0xF80000): Real-time clock
+- **Backlight** (0xFB0000): LCD backlight PWM control
+
+See [Peripherals](/api/peripherals) for detailed peripheral documentation.
+
+## Scheduler Module
+
+The scheduler manages timed events for peripherals:
+
+```rust
+pub enum EventId {
+    Rtc,        // RTC 1-second tick
+    Lcd,        // LCD state machine
+    LcdDma,     // LCD DMA transfers
+    Spi,        // SPI transfers
+    TimerDelay, // Timer interrupt delay pipeline
+}
+```
+
+Events are scheduled in CPU cycles and processed by the main emulation loop. The scheduler handles:
+- CPU speed changes (6/12/24/48 MHz)
+- Event priority and ordering
+- Relative and absolute event scheduling
+
+## C FFI Interface
+
+The emulator exposes a thread-safe C API through `SyncEmu`:
+
+```c
+// Create/destroy emulator instance
+void* emu_create(void);
+void emu_destroy(void* emu);
+
+// Load ROM and power on
+int emu_load_rom(void* emu, const uint8_t* data, size_t len);
+void emu_power_on(void* emu);
+
+// Run emulation
+int emu_run_cycles(void* emu, int cycles);
+
+// Input/output
+void emu_set_key(void* emu, int row, int col, int down);
+const uint32_t* emu_framebuffer(const void* emu, int* w, int* h);
+
+// Save states
+size_t emu_save_state_size(const void* emu);
+int emu_save_state(const void* emu, uint8_t* out, size_t cap);
+int emu_load_state(void* emu, const uint8_t* data, size_t len);
+```
+
+All FFI functions are thread-safe and use a mutex internally to prevent data races.
+
+## Build Configuration
+
+The crate supports multiple build targets:
+
+<CodeGroup>
+```toml Cargo.toml
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+ios_prefixed = []  # Prefix FFI symbols for iOS
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+```
+</CodeGroup>
+
+### Platform Targets
+
+- **Desktop**: Static library with C header
+- **iOS**: Dynamic library with prefixed symbols
+- **WASM**: WebAssembly module with JS bindings
+- **Android**: JNI-compatible shared library
+
+## Testing
+
+The crate includes extensive tests:
+
+```bash
+# Run unit tests
+cd core
+cargo test
+
+# Run integration tests
+cargo test --test '*'
+
+# Boot test (verifies boot sequence parity with CEmu)
+cargo run --release --example debug -- boot
+
+# Generate execution trace
+cargo run --release --example debug -- trace 100000
+```
+
+See [Testing Guide](/development/testing) for detailed testing procedures.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Emu Struct" icon="microchip" href="/api/emu-struct">
+    Learn about the main emulator orchestrator
+  </Card>
+  <Card title="Memory Types" icon="memory" href="/api/memory">
+    Explore Flash, RAM, and memory map types
+  </Card>
+  <Card title="CPU Module" icon="cpu" href="/api/cpu-module">
+    Dive into the eZ80 CPU implementation
+  </Card>
+  <Card title="Peripherals" icon="keyboard" href="/api/peripherals">
+    Understand peripheral controllers
+  </Card>
+</CardGroup>

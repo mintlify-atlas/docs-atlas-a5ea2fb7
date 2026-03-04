@@ -1,0 +1,399 @@
+---
+title: Memory Types
+description: Flash, RAM, VRAM, and memory map types for the TI-84 Plus CE
+---
+
+The `memory` module implements the TI-84 Plus CE memory subsystem, including Flash ROM, RAM, VRAM, and the 24-bit address space mapping.
+
+## Memory Map
+
+The eZ80 processor provides a 24-bit address space (16MB addressable):
+
+| Address Range       | Size    | Type             | Description                     |
+|---------------------|---------|------------------|---------------------------------|
+| 0x000000 - 0x3FFFFF | 4MB     | Flash (ROM)      | OS and user programs            |
+| 0x400000 - 0xCFFFFF | 8.875MB | Unmapped         | Returns pseudo-random values    |
+| 0xD00000 - 0xD3FFFF | 256KB   | RAM              | User RAM                        |
+| 0xD40000 - 0xD657FF | ~150KB  | VRAM             | Video memory (part of RAM)      |
+| 0xD65800 - 0xDFFFFF | ~2.3MB  | Unmapped         | Beyond RAM boundary             |
+| 0xE00000 - 0xFFFFFF | 2MB     | Memory-mapped I/O| Peripheral registers            |
+
+## Address Constants
+
+The `memory::addr` module provides constants for memory regions:
+
+```rust
+use ti84ce_core::memory::addr;
+
+println!("Flash: 0x{:06X} - 0x{:06X}", addr::FLASH_START, addr::FLASH_END);
+println!("RAM:   0x{:06X} - 0x{:06X}", addr::RAM_START, addr::RAM_END);
+println!("VRAM:  0x{:06X} - 0x{:06X}", addr::VRAM_START, 
+         addr::VRAM_START + addr::VRAM_SIZE as u32);
+println!("Ports: 0x{:06X} - 0x{:06X}", addr::PORT_START, addr::PORT_END);
+```
+
+### Available Constants
+
+```rust
+pub mod addr {
+    // Flash region
+    pub const FLASH_START: u32 = 0x000000;
+    pub const FLASH_END: u32 = 0x400000;
+    pub const FLASH_SIZE: usize = 0x400000; // 4MB
+
+    // RAM region
+    pub const RAM_START: u32 = 0xD00000;
+    pub const RAM_END: u32 = 0xD65800;
+    pub const RAM_SIZE: usize = 0x65800; // 256KB + VRAM
+
+    // VRAM region (within RAM)
+    pub const VRAM_START: u32 = 0xD40000;
+    pub const VRAM_SIZE: usize = 0x25800; // ~150KB
+
+    // Memory-mapped I/O
+    pub const PORT_START: u32 = 0xE00000;
+    pub const PORT_END: u32 = 0x1000000;
+
+    // Address mask for 24-bit space
+    pub const ADDR_MASK: u32 = 0xFFFFFF;
+}
+```
+
+## Flash Memory
+
+The `Flash` struct manages 4MB of NOR flash memory:
+
+```rust
+pub struct Flash {
+    data: Vec<u8>,
+    initialized: bool,
+    // ... internal state
+}
+```
+
+### Loading ROM
+
+```rust
+use ti84ce_core::memory::Flash;
+use std::fs;
+
+let mut flash = Flash::new();
+let rom_data = fs::read("TI-84 CE.rom")?;
+flash.load_rom(&rom_data)?;
+
+assert!(flash.is_initialized());
+```
+
+### Reading Flash
+
+```rust
+// Read byte (with command state handling)
+let value = flash.read(0x000000);
+
+// Peek byte (ignores command state, for debugging)
+let value = flash.peek(0x000000);
+
+// Peek with status (respects command state, no state change)
+let value = flash.peek_status(0x000000);
+```
+
+### Writing Flash
+
+Flash writes require unlock sequences (AMD/Fujitsu command set):
+
+```rust
+// Write directly (bypasses unlock, for testing)
+flash.write_direct(0x0C0000, 0x42);
+
+// Write via CPU (requires unlock sequence)
+flash.write_cpu(0xAAA, 0xAA);
+flash.write_cpu(0x555, 0x55);
+flash.write_cpu(0xAAA, 0xA0); // Program byte command
+flash.write_cpu(0x0C0000, 0x42);
+```
+
+### Flash Command Modes
+
+The flash controller supports minimal command emulation:
+
+- **Sector Erase**: Erases 8KB (below 0x10000) or 64KB sectors
+- **Byte Program**: Programs individual bytes (can only clear bits)
+- **Status Poll**: Returns 0x80 when erase/program complete
+
+```rust
+#[derive(Debug, Clone, Copy)]
+enum FlashCommand {
+    None,
+    SectorErase { reads_left: u8 },
+}
+```
+
+### Flash Methods
+
+```rust
+impl Flash {
+    pub fn new() -> Self;
+    pub fn load_rom(&mut self, data: &[u8]) -> Result<(), FlashError>;
+    pub fn read(&mut self, addr: u32) -> u8;
+    pub fn peek(&self, addr: u32) -> u8;
+    pub fn peek_status(&self, addr: u32) -> u8;
+    pub fn write_direct(&mut self, addr: u32, value: u8);
+    pub fn write_cpu(&mut self, addr: u32, value: u8);
+    pub fn is_initialized(&self) -> bool;
+    pub fn reset(&mut self);
+}
+```
+
+## RAM Memory
+
+The `Ram` struct manages 256KB of user RAM plus ~150KB of VRAM:
+
+```rust
+pub struct Ram {
+    data: Vec<u8>,
+}
+```
+
+### Reading/Writing RAM
+
+```rust
+use ti84ce_core::memory::Ram;
+
+let mut ram = Ram::new();
+
+// Byte access
+ram.write(0x0000, 0x42);
+let value = ram.read(0x0000);
+assert_eq!(value, 0x42);
+
+// Word access (16-bit, little-endian)
+ram.write_word(0x0100, 0xBEEF);
+let word = ram.read_word(0x0100);
+assert_eq!(word, 0xBEEF);
+assert_eq!(ram.read(0x0100), 0xEF); // Low byte
+assert_eq!(ram.read(0x0101), 0xBE); // High byte
+
+// 24-bit address access (little-endian)
+ram.write_addr24(0x0200, 0xD12345);
+let addr = ram.read_addr24(0x0200);
+assert_eq!(addr, 0xD12345);
+assert_eq!(ram.read(0x0200), 0x45); // Low byte
+assert_eq!(ram.read(0x0201), 0x23); // Mid byte
+assert_eq!(ram.read(0x0202), 0xD1); // High byte
+```
+
+### VRAM Access
+
+VRAM is a contiguous region within RAM starting at 0xD40000:
+
+```rust
+use ti84ce_core::memory::{Ram, addr};
+
+let mut ram = Ram::new();
+
+// Access via normal RAM interface
+let vram_offset = (addr::VRAM_START - addr::RAM_START) as u32;
+ram.write(vram_offset, 0xFF);
+
+// Access via VRAM slice (immutable)
+let vram = ram.vram();
+assert_eq!(vram.len(), addr::VRAM_SIZE);
+assert_eq!(vram[0], 0xFF);
+
+// Access via mutable VRAM slice
+let vram_mut = ram.vram_mut();
+vram_mut[0] = 0x00;
+```
+
+### VRAM Layout
+
+VRAM stores the 320×240 display as RGB565 pixels:
+
+```rust
+const SCREEN_WIDTH: usize = 320;
+const SCREEN_HEIGHT: usize = 240;
+
+let vram = ram.vram();
+for y in 0..SCREEN_HEIGHT {
+    for x in 0..SCREEN_WIDTH {
+        let offset = (y * SCREEN_WIDTH + x) * 2;
+        let lo = vram[offset] as u16;
+        let hi = vram[offset + 1] as u16;
+        let rgb565 = lo | (hi << 8);
+        
+        // Decode RGB565
+        let r = ((rgb565 >> 11) & 0x1F) as u8;
+        let g = ((rgb565 >> 5) & 0x3F) as u8;
+        let b = (rgb565 & 0x1F) as u8;
+        
+        // Convert to 8-bit RGB
+        let r8 = (r << 3) | (r >> 2);
+        let g8 = (g << 2) | (g >> 4);
+        let b8 = (b << 3) | (b >> 2);
+    }
+}
+```
+
+<Note>
+The LCD controller may use palette mode (1/2/4/8 bpp) instead of direct RGB565. See [LCD Controller](/api/peripherals#lcd-controller) for details.
+</Note>
+
+### RAM Methods
+
+```rust
+impl Ram {
+    pub fn new() -> Self;
+    pub fn read(&self, addr: u32) -> u8;
+    pub fn write(&mut self, addr: u32, value: u8);
+    pub fn read_word(&self, addr: u32) -> u16;
+    pub fn write_word(&mut self, addr: u32, value: u16);
+    pub fn read_addr24(&self, addr: u32) -> u32;
+    pub fn write_addr24(&mut self, addr: u32, value: u32);
+    pub fn vram(&self) -> &[u8];
+    pub fn vram_mut(&mut self) -> &mut [u8];
+    pub fn reset(&mut self);
+}
+```
+
+## Lazy Allocation
+
+Both `Flash` and `Ram` use lazy allocation:
+
+```rust
+let flash = Flash::new(); // No allocation yet
+let ram = Ram::new();     // No allocation yet
+
+// Allocation happens on first write:
+flash.write_direct(0, 0xFF); // Allocates 4MB
+ram.write(0, 0x00);          // Allocates 417KB (RAM + VRAM)
+```
+
+This allows the emulator to start quickly without allocating memory until needed.
+
+## Address Wrapping
+
+RAM addresses wrap at the boundary:
+
+```rust
+use ti84ce_core::memory::{Ram, addr};
+
+let mut ram = Ram::new();
+ram.write(0x100, 0x42);
+
+// Address beyond RAM_SIZE wraps
+let wrapped = addr::RAM_SIZE as u32 + 0x100;
+let value = ram.read(wrapped);
+assert_eq!(value, 0x42); // Same as 0x100
+```
+
+Flash addresses are masked to 24-bit:
+
+```rust
+let mut flash = Flash::new();
+flash.write_direct(0x100, 0x42);
+
+// High bits are masked
+let value = flash.peek(0xFF_FF00_0100);
+assert_eq!(value, 0x42); // Masked to 0x100
+```
+
+## State Persistence
+
+Both `Flash` and `Ram` support state snapshots:
+
+```rust
+// Save flash state
+let flash_data = flash.data();
+std::fs::write("flash.bin", flash_data)?;
+
+// Load flash state
+let data = std::fs::read("flash.bin")?;
+flash.load_data(&data);
+
+// Save RAM state
+let ram_data = ram.data();
+std::fs::write("ram.bin", ram_data)?;
+
+// Load RAM state
+let data = std::fs::read("ram.bin")?;
+ram.load_data(&data);
+```
+
+## Error Handling
+
+Flash operations can fail:
+
+```rust
+pub enum FlashError {
+    /// ROM data exceeds flash capacity (>4MB)
+    RomTooLarge,
+    /// Flash write protection violation
+    WriteProtected,
+}
+
+// Handle errors
+match flash.load_rom(&rom_data) {
+    Ok(()) => println!("ROM loaded"),
+    Err(FlashError::RomTooLarge) => eprintln!("ROM too large"),
+    Err(FlashError::WriteProtected) => eprintln!("Write protected"),
+}
+```
+
+## Memory Protection
+
+The TI-84 Plus CE implements memory protection via control ports:
+
+- **Privileged boundary** (0xE001D-0xE001F): Defines privileged code range
+- **Protected range** (0xE0020-0xE0025): Defines protected memory range
+- **Stack limit** (0xE003A-0xE003C): Prevents stack overflow
+
+Violations trigger a non-maskable interrupt (NMI). See [CPU Module](/api/cpu-module#interrupts) for NMI handling.
+
+## Usage Example
+
+Complete example showing memory subsystem usage:
+
+```rust
+use ti84ce_core::memory::{Flash, Ram, addr};
+use std::fs;
+
+// Initialize memory
+let mut flash = Flash::new();
+let mut ram = Ram::new();
+
+// Load ROM
+let rom = fs::read("TI-84 CE.rom")?;
+flash.load_rom(&rom)?;
+
+// Read boot vector
+let reset_vector = flash.read(0x000000);
+println!("Reset vector: 0x{:02X}", reset_vector);
+
+// Initialize RAM
+ram.write(addr::RAM_START as u32, 0x00);
+
+// Clear VRAM
+let vram_mut = ram.vram_mut();
+for byte in vram_mut.iter_mut() {
+    *byte = 0x00;
+}
+
+println!("Memory initialized");
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="CPU Module" icon="cpu" href="/api/cpu-module">
+    Learn how the CPU accesses memory
+  </Card>
+  <Card title="Peripherals" icon="keyboard" href="/api/peripherals">
+    Explore memory-mapped peripherals
+  </Card>
+  <Card title="Bus Module" icon="diagram-project" href="/api/bus-module">
+    Understand memory routing and timing
+  </Card>
+  <Card title="Testing" icon="vial" href="/development/testing">
+    Test memory subsystem functionality
+  </Card>
+</CardGroup>

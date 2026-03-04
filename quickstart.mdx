@@ -1,80 +1,464 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get the TI-84 Plus CE emulator up and running in minutes
 ---
 
-## Get started in three steps
+# Quickstart
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide will help you build and run the TI-84 Plus CE emulator on your platform of choice. The emulator is cross-platform with native apps for Android, iOS, and web browsers.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  **You'll need a TI-84 Plus CE ROM file to run the emulator.** The ROM contains the calculator's operating system and is not included with this project. You must obtain it legally from your own calculator.
 </Note>
+
+## Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+<Steps>
+  <Step title="Install Rust toolchain">
+    The emulator core is written in Rust. Install it from [rustup.rs](https://rustup.rs/):
+    
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ```
+  </Step>
+
+  <Step title="Platform-specific tools">
+    Choose based on your target platform:
+
+    <Tabs>
+      <Tab title="Web">
+        - **Node.js 18+** for the web frontend
+        - **wasm-pack** for building WebAssembly:
+        
+        ```bash
+        cargo install wasm-pack
+        rustup target add wasm32-unknown-unknown
+        ```
+      </Tab>
+
+      <Tab title="Android">
+        - **Android Studio** with NDK installed
+        - **Android SDK** (API 24+)
+        - **Rust Android targets**:
+        
+        ```bash
+        rustup target add aarch64-linux-android    # ARM64 (most devices)
+        rustup target add armv7-linux-androideabi  # ARM32 (older devices)
+        rustup target add x86_64-linux-android     # x86_64 emulator
+        rustup target add i686-linux-android       # x86 emulator
+        ```
+      </Tab>
+
+      <Tab title="iOS">
+        - **Xcode 15+** (macOS only)
+        - **Rust iOS targets**:
+        
+        ```bash
+        rustup target add aarch64-apple-ios        # iOS device (arm64)
+        rustup target add aarch64-apple-ios-sim    # iOS Simulator (Apple Silicon)
+        rustup target add x86_64-apple-ios         # iOS Simulator (Intel)
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/yourusername/ti84-emulator.git
+    cd ti84-emulator
+    ```
+  </Step>
+</Steps>
+
+## Building for Web
+
+The web app runs entirely in your browser using WebAssembly. This is the fastest way to get started.
+
+<Steps>
+  <Step title="Build the WASM package and web app">
+    Use the provided Makefile target:
+    
+    ```bash
+    make web
+    ```
+    
+    This command:
+    1. Compiles the Rust core to WebAssembly (~96KB gzipped)
+    2. Copies the WASM package to the web app directory
+    3. Installs npm dependencies
+    4. Builds the React frontend with Vite
+  </Step>
+
+  <Step title="Serve the web app">
+    ```bash
+    cd web
+    npx serve dist
+    ```
+    
+    Open your browser to the URL shown (typically `http://localhost:3000`).
+  </Step>
+
+  <Step title="Load your ROM">
+    1. Click "Import ROM" in the web interface
+    2. Select your TI-84 Plus CE ROM file
+    3. Click "Run" to start emulation
+  </Step>
+</Steps>
+
+<Tip>
+  **Development mode with hot reload:**
+  
+  ```bash
+  make web-dev
+  ```
+  
+  This starts a development server at `http://localhost:5173` with automatic reloading when you edit the frontend code.
+</Tip>
+
+### Web Keyboard Controls
+
+The web app includes keyboard shortcuts for calculator keys:
+
+| Keyboard Key | Calculator Function |
+|--------------|---------------------|
+| 0-9          | Number keys         |
+| + - * /      | Math operations     |
+| Enter        | Enter               |
+| Backspace    | Del                 |
+| Arrow keys   | Navigation          |
+| Shift        | 2nd                 |
+| Alt          | Alpha               |
+| O            | ON                  |
+| Space        | Pause emulation     |
+| F1-F5        | Y=/Window/Zoom/Trace/Graph |
+
+## Building for Android
+
+The Android app uses Kotlin with Jetpack Compose for the UI and the Rust core via JNI.
+
+<Steps>
+  <Step title="Build the APK">
+    Use the build script for a streamlined build:
+    
+    ```bash
+    ./scripts/build.sh android
+    ```
+    
+    This compiles the Rust core for ARM64 and builds a release APK.
+
+    <Accordion title="Build options">
+      The build script supports several options:
+      
+      ```bash
+      # Debug build
+      ./scripts/build.sh android --debug
+      
+      # Build and install to connected device
+      ./scripts/build.sh android --install
+      
+      # Build for all ABIs (arm64, arm32, x86_64, x86)
+      ./scripts/build.sh android --all-abis
+      
+      # Use CEmu reference backend instead of Rust
+      ./scripts/build.sh android --cemu
+      ```
+      
+      Or use the Makefile shortcuts:
+      
+      ```bash
+      make android              # Release, arm64, Rust
+      make android-debug        # Debug build
+      make android-install      # Release + install (all ABIs)
+      make android-cemu         # Release with CEmu backend
+      ```
+    </Accordion>
+  </Step>
+
+  <Step title="Install the APK">
+    Connect your Android device via USB with developer mode enabled, then:
+    
+    ```bash
+    ./scripts/build.sh android --install
+    ```
+    
+    Or install manually:
+    
+    ```bash
+    cd android
+    ./gradlew installRelease
+    ```
+  </Step>
+
+  <Step title="Load your ROM">
+    1. Open the app on your device
+    2. Tap "Import ROM"
+    3. Navigate to your ROM file
+    4. Tap "Run" to start emulation
+  </Step>
+</Steps>
+
+<Tip>
+  **Rapid development workflow:**
+  
+  For fast iteration when changing Kotlin code:
+  
+  ```bash
+  cd android
+  ./watch.sh
+  ```
+  
+  This watches for file changes and auto-deploys to your connected device. Requires `fswatch` (`brew install fswatch` on macOS).
+</Tip>
+
+## Building for iOS
+
+The iOS app uses Swift with SwiftUI for the UI. Building requires two steps: compiling the Rust backend library, then building the app in Xcode.
+
+<Steps>
+  <Step title="Build the backend library">
+    For iOS Simulator (Apple Silicon Mac):
+    
+    ```bash
+    ./scripts/build.sh ios --sim
+    ```
+    
+    For physical iOS devices:
+    
+    ```bash
+    ./scripts/build.sh ios
+    ```
+    
+    This compiles the Rust core as a static library (`.a`) that Xcode will link against.
+
+    <Accordion title="Build options">
+      ```bash
+      # Debug build for simulator
+      ./scripts/build.sh ios --sim --debug
+      
+      # Release build for device
+      ./scripts/build.sh ios
+      
+      # Use CEmu reference backend
+      ./scripts/build.sh ios --sim --cemu
+      ```
+      
+      Makefile shortcuts:
+      
+      ```bash
+      make ios              # Release, device
+      make ios-sim          # Release, simulator
+      make ios-debug        # Debug, device
+      make ios-sim-cemu     # Simulator with CEmu backend
+      ```
+    </Accordion>
+  </Step>
+
+  <Step title="Open Xcode and build the app">
+    ```bash
+    open ios/Calc.xcodeproj
+    ```
+    
+    In Xcode:
+    1. Select your target device or simulator
+    2. Press `Cmd+R` to build and run
+    3. The app will launch on your selected target
+  </Step>
+
+  <Step title="Load your ROM">
+    1. In the iOS app, tap "Import ROM"
+    2. Select your ROM file from Files
+    3. Tap "Run" to start emulation
+  </Step>
+</Steps>
+
+<Note>
+  The build script only compiles the emulator backend. Xcode handles building the Swift app and linking against the static library.
+</Note>
+
+## Testing the Rust Core
+
+The Rust core includes a comprehensive test suite covering CPU instructions, memory subsystem, and peripherals.
+
+```bash
+cd core
+cargo test
+```
+
+<Accordion title="Available test commands">
+  From the `core/` directory, use these cargo aliases:
+  
+  ```bash
+  cargo boot      # Run boot test with progress reporting
+  cargo screen    # Render screen to PNG after boot
+  cargo vram      # Analyze VRAM colors
+  cargo trace     # Generate trace log (100k steps)
+  cargo dbg       # Show debug tool help
+  cargo t         # Run all tests
+  cargo rb        # Release build
+  ```
+  
+  These aliases are defined in `core/.cargo/config.toml`.
+</Accordion>
+
+## Using the CEmu Reference Backend
+
+The apps can optionally be built with [CEmu](https://github.com/CE-Programming/CEmu), the established open-source TI-84 Plus CE emulator, as the backend. This is useful for:
+
+- **Parity testing** - Compare Rust core behavior against known-correct emulation
+- **Bug investigation** - Determine if issues are in your code or inherent to the ROM
+- **Feature development** - Test UI features before Rust implementation is complete
+
+<Steps>
+  <Step title="Clone CEmu">
+    ```bash
+    git clone https://github.com/CE-Programming/CEmu.git cemu-ref
+    ```
+    
+    The `cemu-ref/` directory is git-ignored and won't be committed to your repository.
+  </Step>
+
+  <Step title="Build with CEmu backend">
+    <CodeGroup>
+      ```bash Android
+      ./scripts/build.sh android --cemu
+      ```
+      
+      ```bash iOS
+      ./scripts/build.sh ios --sim --cemu
+      # Then open ios/Calc.xcodeproj in Xcode
+      ```
+      
+      ```bash Web
+      make web-cemu
+      ```
+    </CodeGroup>
+    
+    The app behavior should be identical regardless of backend. If it differs, that's a bug to investigate.
+  </Step>
+</Steps>
+
+<Warning>
+  CEmu is written in C and compiled via Emscripten for web builds. The resulting WASM file is significantly larger than the Rust core.
+</Warning>
+
+## Loading Programs (.8xp / .8xv)
+
+The emulator supports loading TI-84 CE programs (`.8xp`) and AppVars (`.8xv`) into the calculator's flash archive.
+
+### From the Apps
+
+All three apps (web, Android, iOS) include file pickers for loading programs:
+
+1. Use the "Load Program" or similar menu option
+2. Select one or more `.8xp` or `.8xv` files
+3. The files are injected into flash
+4. Programs appear in the TI-OS program menu after reboot
+
+### From the Debug Tool
+
+The Rust core includes CLI commands for loading programs:
+
+<CodeGroup>
+  ```bash sendfile
+  cd core
+  
+  # Inject a single program
+  cargo run --release --example debug -- sendfile DOOM.8xp
+  
+  # Inject a program with its required C libraries
+  cargo run --release --example debug -- sendfile DOOM.8xp clibs/*.8xv
+  ```
+  
+  ```bash bakerom
+  cd core
+  
+  # Create a new ROM with programs pre-installed
+  cargo run --release --example debug -- bakerom doom.rom DOOM.8xp clibs/*.8xv
+  
+  # Then use the baked ROM like any other ROM file
+  ```
+</CodeGroup>
+
+<Note>
+  Programs built with the CE C toolchain (e.g., games using graphx) need their library `.8xv` files included. Common libraries: `libload.8xv`, `graphx.8xv`, `keypadc.8xv`, `fileioc.8xv`.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Learn about the dual backend design, Rust core structure, and memory map
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api">
+    Explore the C API for integrating the emulator core
+  </Card>
+  
+  <Card title="Development" icon="wrench" href="/development">
+    Dive into development workflows, debugging tools, and testing
+  </Card>
+  
+  <Card title="Contributing" icon="users" href="/contributing">
+    Learn how to contribute to the project
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Android build fails with 'NDK not found'">
+    Open Android Studio, go to **SDK Manager** → **SDK Tools**, and install:
+    - NDK (Side by side)
+    - CMake
+    
+    Then set your NDK path in `local.properties`:
+    
+    ```properties
+    ndk.dir=/Users/yourname/Library/Android/sdk/ndk/25.2.9519653
+    ```
+  </Accordion>
+
+  <Accordion title="iOS build fails with 'library not found'">
+    Make sure you've run the build script before opening Xcode:
+    
+    ```bash
+    ./scripts/build.sh ios --sim
+    ```
+    
+    The build script outputs the static library that Xcode expects to find.
+  </Accordion>
+
+  <Accordion title="Web build: 'wasm-pack not found'">
+    Install wasm-pack:
+    
+    ```bash
+    cargo install wasm-pack
+    rustup target add wasm32-unknown-unknown
+    ```
+  </Accordion>
+
+  <Accordion title="Emulator boots to black screen">
+    This usually means:
+    - ROM file is corrupted or invalid
+    - ROM is for a different calculator model (need TI-84 Plus CE)
+    
+    Try a different ROM file or re-extract from your physical calculator.
+  </Accordion>
+
+  <Accordion title="Tests fail with 'ROM not found'">
+    Some tests require a ROM file. Place your ROM at:
+    
+    ```
+    TI-84 CE.rom
+    ```
+    
+    in the repository root, or specify the path via environment variable:
+    
+    ```bash
+    export ROM_PATH=/path/to/your/rom.rom
+    cargo test
+    ```
+  </Accordion>
+</AccordionGroup>

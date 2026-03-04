@@ -1,0 +1,273 @@
+---
+title: Unified Build Script
+description: Documentation for the scripts/build.sh command and its options
+---
+
+The project provides a unified build script that handles cross-compilation and backend selection for both Android and iOS platforms.
+
+## Basic Usage
+
+```bash
+./scripts/build.sh <platform> [options]
+```
+
+**Platforms:**
+- `android` - Build for Android
+- `ios` - Build for iOS
+
+## Options
+
+### Build Configuration
+
+| Option | Description | Default |
+|--------|-------------|----------|
+| `--release` | Build in release mode (optimized) | Yes |
+| `--debug` | Build in debug mode (with symbols) | No |
+
+### Backend Selection
+
+| Option | Description | Default |
+|--------|-------------|----------|
+| `--rust` | Use Rust backend only | Yes |
+| `--cemu` | Use CEmu backend only | No |
+| `--both` | Include both backends (runtime switching) | No |
+
+### Platform-Specific Options
+
+**Android:**
+
+| Option | Description | Default |
+|--------|-------------|----------|
+| `--install` | Install APK after build | No |
+| `--all-abis` | Build for all ABIs (arm64, arm32, x86_64, x86) | No (arm64 only) |
+
+**iOS:**
+
+| Option | Description | Default |
+|--------|-------------|----------|
+| `--sim` | Build for iOS Simulator | No (device) |
+| `--open` | Open Xcode after building backend | No |
+
+### Other Options
+
+| Option | Description |
+|--------|-------------|
+| `--help` | Show help message |
+
+## Android Examples
+
+### Basic Builds
+
+```bash
+# Release build, ARM64 only, Rust backend
+./scripts/build.sh android
+
+# Debug build with installation
+./scripts/build.sh android --debug --install
+
+# Release build for all ABIs
+./scripts/build.sh android --all-abis
+```
+
+### Backend Selection
+
+```bash
+# Build with CEmu backend only
+./scripts/build.sh android --cemu
+
+# Build with both backends (runtime switching)
+./scripts/build.sh android --both --install
+```
+
+### Output Location
+
+Built APKs are placed in:
+
+```
+android/app/build/outputs/apk/release/app-release.apk  # Release
+android/app/build/outputs/apk/debug/app-debug.apk      # Debug
+```
+
+## iOS Examples
+
+### Basic Builds
+
+```bash
+# Release build for device, Rust backend
+./scripts/build.sh ios
+
+# Debug build for device
+./scripts/build.sh ios --debug
+
+# Release build for simulator
+./scripts/build.sh ios --sim
+```
+
+### Backend Selection
+
+```bash
+# Build device with CEmu backend
+./scripts/build.sh ios --cemu
+
+# Build simulator with both backends
+./scripts/build.sh ios --sim --both
+
+# Build and open Xcode
+./scripts/build.sh ios --sim --open
+```
+
+### iOS Build Process
+
+The build script only compiles the backend library (Rust and/or CEmu). After running the script:
+
+1. Open the Xcode project:
+   ```bash
+   open ios/Calc.xcodeproj
+   ```
+
+2. Select the appropriate scheme:
+   - **Calc-Rust** - Rust backend only
+   - **Calc-CEmu** - CEmu backend only
+   - **Calc-Both** - Both backends with runtime switching
+
+3. Press `Cmd+R` to build and run the app
+
+### Output Location
+
+Backend libraries are placed in:
+
+```
+core/target/aarch64-apple-ios/release/libemu_rust.a              # Device
+core/target/aarch64-apple-ios-sim/release/libemu_rust.a          # Simulator (Apple Silicon)
+core/target/x86_64-apple-ios/release/libemu_rust.a               # Simulator (Intel)
+core/target/<arch>/release/libemu_cemu.a                          # CEmu adapter
+```
+
+## Make Targets (Shortcuts)
+
+For convenience, the project includes Make targets as shortcuts for common build commands.
+
+### Android Make Targets
+
+```bash
+# Rust backend (default)
+make android              # Release, arm64, Rust
+make android-debug        # Debug, arm64, Rust
+make android-install      # Release + install, all ABIs
+
+# Both backends
+make android-both         # Release, both backends
+make android-both-install # Release + install, both backends
+
+# CEmu backend only
+make android-cemu         # Release, CEmu only
+make android-cemu-install # Release + install, CEmu
+```
+
+### iOS Make Targets
+
+```bash
+# Rust backend (default)
+make ios             # Release, device, Rust
+make ios-debug       # Debug, device, Rust
+make ios-sim         # Release, simulator, Rust
+
+# Both backends
+make ios-both        # Release, device, both backends
+make ios-sim-both    # Release, simulator, both backends
+
+# CEmu backend only
+make ios-cemu        # Release, device, CEmu
+make ios-sim-cemu    # Release, simulator, CEmu
+```
+
+### Utility Make Targets
+
+```bash
+make test            # Run Rust unit tests
+make clean           # Clean all build artifacts
+make help            # Show all available targets
+```
+
+## Build Process Details
+
+### Android Build Steps
+
+1. **Rust Core Compilation** (if `--rust`)
+   - Detects Android NDK location
+   - Adds NDK toolchain to PATH
+   - Builds Rust core for target ABIs
+   - Output: `core/target/<abi>/release/libemu_core.a`
+
+2. **Gradle Build**
+   - Cleans CMake cache if backend changed
+   - Passes backend flags to Gradle
+   - Compiles native code (JNI bridge + backend)
+   - Assembles APK
+
+3. **Installation** (if `--install`)
+   - Uninstalls existing app
+   - Installs new APK via `adb`
+
+### iOS Build Steps
+
+1. **Rust Core Compilation** (if `--rust`)
+   - Determines target architecture (device or simulator)
+   - Builds with `ios_prefixed` feature (exports `rust_*` symbols)
+   - Copies to `libemu_rust.a`
+
+2. **CEmu Adapter Compilation** (if `--cemu`)
+   - Generates CMakeLists.txt for CEmu sources
+   - Builds with CMake/Xcode for iOS target
+   - Copies to `libemu_cemu.a`
+
+3. **Xcode Integration**
+   - Backend libraries are statically linked by Xcode
+   - `backend_bridge.c` provides unified API and runtime switching
+
+## Troubleshooting
+
+### Android NDK Not Found
+
+```
+Error: ANDROID_NDK_HOME not set and couldn't find NDK automatically.
+```
+
+**Solution:** Set the environment variable:
+
+```bash
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/<version>
+```
+
+### CEmu Not Found
+
+```
+Error: cemu-ref not found. Please clone CEmu first
+```
+
+**Solution:** Clone the CEmu repository:
+
+```bash
+git clone https://github.com/CE-Programming/CEmu.git cemu-ref
+```
+
+### Rust Target Not Installed
+
+If you see "error: toolchain 'stable-...' does not have target '...'":
+
+```bash
+# Android
+rustup target add aarch64-linux-android
+
+# iOS Device
+rustup target add aarch64-apple-ios
+
+# iOS Simulator
+rustup target add aarch64-apple-ios-sim  # Apple Silicon
+rustup target add x86_64-apple-ios       # Intel
+```
+
+## Next Steps
+
+- [Platform-Specific Builds](/building/platform-specific) - Manual build instructions using Gradle/Xcode directly
+- [Testing](/testing) - Run tests and verify your build

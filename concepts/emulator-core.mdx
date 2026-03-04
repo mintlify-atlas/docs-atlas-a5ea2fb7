@@ -1,0 +1,220 @@
+---
+title: "Emulator Core Architecture"
+description: "Understanding the Rust-based TI-84 Plus CE emulator core structure and design"
+---
+
+# Emulator Core Architecture
+
+The TI-84 Plus CE emulator core is a from-scratch Rust implementation that accurately recreates the TI-84 Plus CE hardware in software. The core is platform-agnostic, with no OS dependencies, and provides a stable C ABI for integration with Android, iOS, and web applications.
+
+## Module Organization
+
+The emulator core is organized into several focused modules, each handling a specific aspect of the hardware:
+
+```
+core/
+├── src/
+│   ├── lib.rs          # C ABI exports and FFI layer
+│   ├── emu.rs          # Main emulator orchestrator
+│   ├── cpu/            # eZ80 CPU implementation
+│   ├── memory.rs       # Flash, RAM, and memory subsystem
+│   ├── bus.rs          # Address decoding and memory routing
+│   ├── peripherals/    # Hardware peripherals (LCD, timers, etc.)
+│   ├── scheduler.rs    # Event scheduling system
+│   └── disasm.rs       # Instruction disassembler
+```
+
+### Core Modules
+
+#### `emu.rs` - Emulator Orchestrator
+
+The `Emu` struct is the main entry point that coordinates all subsystems:
+
+- **CPU Execution**: Manages the eZ80 CPU instruction stepping
+- **Event Scheduling**: Coordinates timed events (timers, LCD, RTC)
+- **Frame Rendering**: Converts VRAM to ARGB8888 framebuffer
+- **State Management**: Handles reset, save states, and ROM loading
+- **Cycle Accounting**: Tracks total cycles for accurate emulation timing
+
+```rust
+pub struct Emu {
+    cpu: Cpu,              // eZ80 CPU state
+    bus: Bus,              // Memory and I/O routing
+    scheduler: Scheduler,  // Event scheduling
+    framebuffer: Vec<u32>, // 320x240 ARGB8888 display
+    // ... state tracking fields
+}
+```
+
+Key methods:
+- `load_rom()`: Load TI-84 CE ROM into flash memory
+- `run_cycles()`: Execute for N cycles, returns actual cycles executed
+- `step()`: Execute one instruction, returns detailed trace information
+- `render_frame()`: Update framebuffer from VRAM
+- `set_key()`: Handle keypad input
+
+#### `cpu/` - eZ80 CPU Implementation
+
+Implements the complete eZ80 instruction set with ADL mode support:
+
+- **Register Set**: 24-bit BC, DE, HL, IX, IY in ADL mode
+- **Instruction Execution**: Cycle-accurate instruction timing
+- **Interrupt Handling**: Maskable (IRQ) and non-maskable (NMI) interrupts
+- **ADL Mode**: 24-bit addressing with mixed-mode support
+- **Prefetch Buffer**: Matches CEmu's cycle timing for instruction fetches
+
+See [CPU Architecture](/concepts/cpu) for detailed CPU documentation.
+
+#### `memory.rs` - Memory Subsystem
+
+Manages the three main memory types:
+
+- **Flash**: 4MB NOR flash for OS and programs (lazy allocation)
+- **RAM**: 256KB user RAM + ~150KB VRAM
+- **Ports**: Memory-mapped I/O peripherals
+
+See [Memory Map](/concepts/memory-map) for address layout details.
+
+#### `bus.rs` - System Bus
+
+Provides address decoding and routes memory accesses:
+
+- **Address Decoding**: Maps 24-bit addresses to appropriate memory regions
+- **Wait States**: Adds accurate timing for flash/RAM/port accesses
+- **Flash Cache**: Serial flash cache simulation for newer CE models
+- **Memory Protection**: Enforces privileged/unprivileged code boundaries
+- **I/O Tracing**: Comprehensive logging for debugging and parity testing
+
+See [Dual Backend Architecture](/concepts/dual-backend) for timing modes.
+
+#### `peripherals/` - Hardware Peripherals
+
+Emulates TI-84 CE hardware devices:
+
+- **LCD Controller**: 320x240 16-bit color display with DMA
+- **Keypad**: 8x7 key matrix with scan modes
+- **Timers**: 3 general-purpose timers with interrupts
+- **RTC**: Real-time clock with latching
+- **Interrupt Controller**: Manages hardware interrupt sources
+- **SPI**: Serial peripheral interface for hardware communication
+- **Flash Controller**: Flash memory configuration and wait states
+
+#### `scheduler.rs` - Event Scheduling
+
+Cycle-accurate event system for timed peripherals:
+
+- **Event Types**: LCD DMA, timers, RTC, SPI transfers
+- **CPU Speed Scaling**: Adjusts event timing when CPU speed changes (6/12/24/48 MHz)
+- **Second Boundaries**: Handles second rollover for RTC
+- **Batched Processing**: Optimizes HALT loops by batching events
+
+## Execution Flow
+
+The emulator follows this execution model:
+
+```
+App calls emu_run_cycles(800000)  // ~60 FPS at 48MHz
+  ↓
+Emu.run_cycles() loop:
+  ┌─ CPU.step()                    // Execute one instruction
+  │    ├─ Fetch opcode bytes
+  │    ├─ Execute instruction logic
+  │    └─ Return cycles used
+  ├─ Scheduler.advance(cycles)    // Update event timeline
+  ├─ Process pending events        // LCD DMA, timers, etc.
+  ├─ Check for interrupts          // Raise IRQ if needed
+  └─ HALT fast-forward (if halted) // Skip to next event
+  ↓
+Emu.render_frame()                // Convert VRAM → framebuffer
+  ↓
+App displays framebuffer
+```
+
+### Cycle Accounting
+
+The emulator uses dual cycle counters for CEmu parity:
+
+- **`bus.cycles`**: CPU internal timing (instruction execution)
+- **`bus.mem_cycles`**: Memory access timing (flash/RAM wait states)
+- **Total cycles**: `bus.cycles + bus.mem_cycles`
+
+This split allows accurate emulation of:
+- Flash wait states (10 cycles for parallel flash, 2-197 for serial flash cache)
+- RAM timing (4 cycles read, 2 cycles write)
+- Port access delays (2-4 cycles depending on peripheral)
+- CPU speed changes (6/12/24/48 MHz via port 0x01)
+
+## C API Layer
+
+The core provides a C-compatible API for platform integration:
+
+```c
+// Core lifecycle
+void* emu_create();
+void emu_destroy(void* emu);
+
+// ROM and state management
+int emu_load_rom(void* emu, const uint8_t* data, size_t len);
+void emu_reset(void* emu);
+void emu_power_on(void* emu);
+
+// Execution
+int emu_run_cycles(void* emu, int cycles);
+
+// Display
+const uint32_t* emu_framebuffer(const void* emu, int* w, int* h);
+uint8_t emu_get_backlight(const void* emu);
+int emu_is_lcd_on(const void* emu);
+
+// Input
+void emu_set_key(void* emu, int row, int col, int down);
+
+// Save states
+size_t emu_save_state_size(const void* emu);
+int emu_save_state(const void* emu, uint8_t* out, size_t cap);
+int emu_load_state(void* emu, const uint8_t* data, size_t len);
+
+// File injection
+int emu_send_file(void* emu, const uint8_t* data, size_t len);
+```
+
+All FFI calls go through a `Mutex<Emu>` wrapper for thread safety.
+
+## Memory Management
+
+The core uses lazy allocation for efficiency:
+
+- **Flash**: Empty `Vec` until `load_rom()` called, then allocated to 4MB
+- **RAM**: Empty `Vec` until first write, then allocated to full size
+- **No Pre-allocation**: Reduces memory footprint for unused regions
+
+## Build Targets
+
+The core supports multiple compilation targets:
+
+- **Android**: Static library (`.a`) via Android NDK
+- **iOS**: Static library (`.a`) via cargo with iOS targets
+- **Web**: WebAssembly (`.wasm`) via `wasm-pack`
+- **Native**: Standalone for debugging and testing
+
+## Testing Strategy
+
+The core includes comprehensive testing:
+
+- **Unit Tests**: Per-module tests for memory, CPU instructions, peripherals
+- **Integration Tests**: Calculator boot sequence, keypad, LCD rendering
+- **Parity Testing**: Trace comparison with CEmu reference emulator
+- **Debug Tools**: Instruction tracing, memory dumps, screen rendering
+
+## Performance Characteristics
+
+- **Native**: 1000+ FPS emulation speed on modern hardware
+- **WASM**: 60+ FPS in browser with ~96KB gzipped bundle
+- **Mobile**: 60 FPS target on mid-range devices
+- **HALT Optimization**: Batched event processing during idle loops
+
+## Next Steps
+
+- [Dual Backend Architecture](/concepts/dual-backend) - Rust vs CEmu backend comparison
+- [Memory Map](/concepts/memory-map) - TI-84 CE address space layout
+- [CPU Architecture](/concepts/cpu) - eZ80 instruction set and ADL mode

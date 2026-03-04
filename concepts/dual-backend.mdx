@@ -1,0 +1,342 @@
+---
+title: "Dual Backend Architecture"
+description: "Understanding the Rust and CEmu backend switching system"
+---
+
+# Dual Backend Architecture
+
+The TI-84 Plus CE emulator supports **two interchangeable backends**: a custom Rust implementation and a CEmu adapter. Both backends implement the same C API, allowing the apps to switch between them at build time without code changes.
+
+## Overview
+
+```
+┌─────────────────────────────────────────────────┐
+│              Application Layer                  │
+│     (Android/Kotlin, iOS/Swift, Web/React)      │
+├─────────────────────────────────────────────────┤
+│           C API (emu.h) / WASM Bindings         │
+│  emu_create, emu_load_rom, emu_run_cycles, ...  │
+├───────────────────┬─────────────────────────────┤
+│   Rust Backend    │   CEmu Adapter              │
+│   (libemu_core.a) │   (libcemu_adapter.a)       │
+│   (emu_core.wasm) │   (cemu.wasm)               │
+│                   │                             │
+│   From-scratch    │   Wraps CEmu reference      │
+│   implementation  │   emulator                  │
+└───────────────────┴─────────────────────────────┘
+```
+
+## Why Two Backends?
+
+### Rust Backend (Default)
+
+**Advantages:**
+- **From-scratch implementation**: Full control over behavior and optimization
+- **Modern codebase**: Memory-safe Rust with clean architecture
+- **Cross-platform**: Single codebase for Android, iOS, and Web
+- **Performance**: WASM optimizations, lazy allocation, batched processing
+- **Small bundle**: ~96KB gzipped for web builds
+
+**Use cases:**
+- Production builds for all platforms
+- Custom features and optimizations
+- Educational analysis of emulator internals
+
+### CEmu Backend (Reference)
+
+**Advantages:**
+- **Proven accuracy**: Established emulator used by CE community
+- **Reference implementation**: Ground truth for behavior verification
+- **Battle-tested**: Years of real-world usage and bug fixes
+
+**Use cases:**
+- **Parity testing**: Compare Rust behavior against known-correct CEmu
+- **Bug investigation**: Determine if issues are emulation bugs or ROM quirks
+- **Feature validation**: Test UI features before Rust implementation is complete
+- **Performance baseline**: Compare frame rates and responsiveness
+
+## Building with Different Backends
+
+### Android
+
+```bash
+# Rust backend (default)
+./scripts/build.sh android
+
+# CEmu backend
+./scripts/build.sh android --cemu
+```
+
+### iOS
+
+```bash
+# Rust backend (default)
+./scripts/build.sh ios
+
+# CEmu backend
+./scripts/build.sh ios --cemu
+
+# Then open Xcode to build the app
+open ios/Calc.xcodeproj
+```
+
+### Web
+
+```bash
+# Rust backend (default)
+make web
+
+# CEmu backend
+make web-cemu
+```
+
+## Backend Differences
+
+### Flash Timing Modes
+
+The Rust backend supports two flash timing modes:
+
+#### Parallel Flash (Default)
+- **Older TI-84 CE models** (pre-2019)
+- **Constant timing**: 10 cycles per flash read (configurable via port 0xE10005)
+- **Better compatibility**: Works with all ROM versions
+- **More predictable**: No cache behavior to account for
+
+```rust
+// Default mode in Rust backend
+emu.set_serial_flash(false);
+```
+
+#### Serial Flash
+- **Newer TI-84 CE models** (2019+)
+- **Cache-based timing**: 2-3 cycles (hit), 197 cycles (miss)
+- **Higher performance**: Faster when code is cache-hot
+- **More complex**: 2-way set-associative cache simulation
+
+```rust
+// Enable serial flash mode
+emu.set_serial_flash(true);
+```
+
+The CEmu backend uses serial flash timing by default.
+
+### Unmapped Region Timing
+
+**Unmapped memory regions** (0x400000-0xCFFFFF, 0xD65800-0xDFFFFF):
+
+| Backend | Flash Mode | Cycles | Behavior |
+|---------|------------|--------|-----------|
+| Rust    | Parallel   | 258    | Pseudo-random data |
+| Rust    | Serial     | 2      | Pseudo-random data |
+| CEmu    | Serial     | 2      | Pseudo-random data |
+
+### Port Timing
+
+**Memory-mapped I/O ports** (0xE00000-0xFFFFFF):
+
+Both backends use identical port timing per CEmu's `port.c`:
+
+```
+Range  Device               Read  Write
+0x0    Control              2     2
+0x1    Flash controller     2     2
+0x2    SHA256               2     2
+0x3    USB                  4     4
+0x4    LCD                  3     2
+0x5    Interrupt            3     3
+0x6    Watchdog             3     3
+0x7    Timers               3     3
+0x8    RTC                  3     3
+0x9    Protected            3     3
+0xA    Keypad               3     3
+0xB    Backlight            3     3
+0xC    Reserved             3     3
+0xD    SPI                  3     3
+0xE    UART                 3     3
+0xF    Control (alt)        3     3
+```
+
+Port writes use a delay/rewind mechanism:
+1. Add 4 cycles before write
+2. Process the write (may trigger CPU speed change)
+3. Rewind by (4 - actual_port_cycles)
+
+This ensures correct cycle accounting when CPU speed changes mid-write.
+
+## API Compatibility
+
+Both backends implement the **exact same C API** from `core/include/emu.h`:
+
+```c
+// Lifecycle
+void* emu_create();
+void emu_destroy(void* emu);
+
+// State
+int emu_load_rom(void* emu, const uint8_t* data, size_t len);
+void emu_reset(void* emu);
+void emu_power_on(void* emu);
+
+// Execution
+int emu_run_cycles(void* emu, int cycles);
+
+// Display
+const uint32_t* emu_framebuffer(const void* emu, int* w, int* h);
+uint8_t emu_get_backlight(const void* emu);
+int emu_is_lcd_on(const void* emu);
+
+// Input
+void emu_set_key(void* emu, int row, int col, int down);
+
+// Save states
+size_t emu_save_state_size(const void* emu);
+int emu_save_state(const void* emu, uint8_t* out, size_t cap);
+int emu_load_state(void* emu, const uint8_t* data, size_t len);
+```
+
+Apps can switch backends without changing a single line of code.
+
+## Parity Testing
+
+The dual backend architecture enables rigorous testing:
+
+### Trace Comparison
+
+Generate execution traces from both backends and compare:
+
+```bash
+# Generate CEmu trace (10k instructions)
+cd tools/cemu-test
+./trace_gen ../../TI-84\ CE.rom -n 10000 -o cemu_trace.txt
+
+# Generate Rust trace
+cd ../../core
+cargo run --release --example debug -- trace 10000 > rust_trace.txt
+
+# Compare
+diff ../tools/cemu-test/cemu_trace.txt rust_trace.txt
+```
+
+Trace format (CSV):
+```
+step,cycles,PC,SP,AF,BC,DE,HL,IX,IY,ADL,IFF1,IFF2,IM,HALT,opcode
+0,0,000000,000000,0000,000000,000000,000000,000000,000000,0,0,0,0,0,F3
+```
+
+### Full Trace Comparison (JSON)
+
+For detailed I/O-level comparison:
+
+```bash
+# Rust full trace
+cd core
+cargo run --release --example debug -- fulltrace 1000
+
+# CEmu full trace (requires patched CEmu)
+cd ../cemu-ref
+./test/fulltrace "../TI-84 CE.rom" 1000 /tmp/cemu_trace.json
+
+# Compare
+cd ../core
+cargo run --release --example debug -- fullcompare \
+  ../traces/fulltrace_*.json /tmp/cemu_trace.json
+```
+
+JSON trace includes:
+- Register state before/after
+- Memory reads/writes
+- Port access
+- Cycle deltas per operation
+
+### Parity Check Tool
+
+The `parity_check` tool runs both backends in parallel:
+
+```bash
+cd tools/cemu-test
+make
+./parity_check ../../TI-84\ CE.rom -m 60000000 -v
+```
+
+Monitors key addresses:
+- `0xD000C4`: MathPrint flag
+- `0xF80020`: RTC control register
+- `0xF80040`: RTC load status
+
+Reports divergences in real-time.
+
+## Performance Comparison
+
+| Metric | Rust | CEmu | Notes |
+|--------|------|------|-------|
+| WASM size | ~96KB | ~800KB | Gzipped bundle |
+| Native FPS | 1000+ | 1000+ | Both exceed 60 FPS target |
+| WASM FPS | 60+ | 30-40 | Rust optimized for web |
+| Boot time | ~62M cycles | ~62M cycles | Identical behavior |
+| Memory usage | ~5MB | ~8MB | Lazy allocation |
+
+## Backend Selection Guidelines
+
+### Use Rust Backend When:
+- Shipping production builds (all platforms)
+- Optimizing performance or bundle size
+- Implementing new features
+- Learning emulator internals
+
+### Use CEmu Backend When:
+- Investigating emulation accuracy bugs
+- Validating new peripheral implementations
+- Testing app features before Rust core is complete
+- Establishing baseline behavior for a ROM edge case
+
+## Implementation Details
+
+### Rust Backend Structure
+
+```rust
+// core/src/lib.rs
+pub struct SyncEmu {
+    inner: Mutex<Emu>,
+}
+
+#[no_mangle]
+pub extern "C" fn emu_create() -> *mut SyncEmu {
+    Box::into_raw(Box::new(SyncEmu::new()))
+}
+
+#[no_mangle]
+pub extern "C" fn emu_run_cycles(emu: *mut SyncEmu, cycles: i32) -> i32 {
+    let sync_emu = unsafe { &*emu };
+    let mut emu = sync_emu.inner.lock().unwrap();
+    emu.run_cycles(cycles as u32) as i32
+}
+```
+
+### CEmu Adapter Structure
+
+```c
+// android/app/src/main/cpp/cemu/cemu_adapter.c
+typedef struct {
+    calc_var* calc;
+    uint32_t* framebuffer;
+} cemu_emu_t;
+
+void* emu_create() {
+    cemu_emu_t* emu = calloc(1, sizeof(cemu_emu_t));
+    emu->calc = calc_var_new();
+    // ... initialize CEmu state
+    return emu;
+}
+
+int emu_run_cycles(void* emu, int cycles) {
+    cemu_emu_t* e = (cemu_emu_t*)emu;
+    // ... call CEmu execution functions
+    return actual_cycles;
+}
+```
+
+## Next Steps
+
+- [Emulator Core](/concepts/emulator-core) - Rust core architecture overview
+- [Memory Map](/concepts/memory-map) - TI-84 CE address space
+- [CPU](/concepts/cpu) - eZ80 instruction set and timing

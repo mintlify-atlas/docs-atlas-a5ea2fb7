@@ -1,0 +1,764 @@
+---
+title: 'iOS Integration'
+description: 'Integrate the TI-84 Plus CE emulator core into iOS applications'
+---
+
+## Overview
+
+The iOS app uses Swift with SwiftUI for the UI and integrates the emulator core as a static library. The core can be built with either the Rust implementation or the CEmu reference backend.
+
+## Architecture
+
+```
+┌─────────────────────────────────────┐
+│   iOS App (Swift/SwiftUI)           │
+│   - ContentView.swift               │
+│   - EmulatorBridge.swift            │
+├─────────────────────────────────────┤
+│   C API Bridge                      │
+│   - emu.h (C header)                │
+│   - backend_bridge.c (runtime)      │
+├─────────────────────────────────────┤
+│   Emulator Backend                  │
+│   - libemu_rust.a (Rust core)       │
+│   - libemu_cemu.a (CEmu adapter)    │
+└─────────────────────────────────────┘
+```
+
+Xcode links the static libraries directly and uses a runtime bridge (`backend_bridge.c`) to select between backends at runtime.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Install Xcode">
+    Download Xcode 15+ from the [Mac App Store](https://apps.apple.com/us/app/xcode/id497799835)
+  </Step>
+  
+  <Step title="Install Rust">
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ```
+  </Step>
+  
+  <Step title="Add iOS targets">
+    ```bash
+    rustup target add aarch64-apple-ios        # iOS device (arm64)
+    rustup target add aarch64-apple-ios-sim    # iOS Simulator (Apple Silicon)
+    rustup target add x86_64-apple-ios         # iOS Simulator (Intel)
+    ```
+  </Step>
+</Steps>
+
+## Building
+
+### Step 1: Build the Backend Library
+
+Use the unified build script to compile the Rust core:
+
+```bash
+# For iOS Simulator (Apple Silicon Mac)
+./scripts/build.sh ios --sim
+
+# For iOS Simulator (Intel Mac)
+./scripts/build.sh ios --sim
+
+# For iOS Device
+./scripts/build.sh ios
+
+# With CEmu backend
+./scripts/build.sh ios --sim --cemu
+```
+
+<Info>
+  The build script compiles the emulator backend (Rust or CEmu) as a static library (`.a` file) and places it in `core/target/<arch>/release/`.
+</Info>
+
+### Step 2: Build and Run in Xcode
+
+After building the backend library:
+
+```bash
+# Open the Xcode project
+open ios/Calc.xcodeproj
+
+# Or use the script to build and open
+./scripts/build.sh ios --sim --open
+```
+
+In Xcode:
+1. Select the appropriate scheme:
+   - **Calc-Rust** - Uses Rust backend only
+   - **Calc-CEmu** - Uses CEmu backend only  
+   - **Calc-Both** - Includes both backends (runtime switching)
+2. Select your target device (Simulator or physical device)
+3. Press **⌘R** to build and run
+
+### Using Make Shortcuts
+
+```bash
+make ios              # Device, Rust backend
+make ios-sim          # Simulator, Rust backend
+make ios-cemu         # Device, CEmu backend
+make ios-sim-cemu     # Simulator, CEmu backend
+make ios-debug        # Debug build
+```
+
+## Integration Guide
+
+### Step 1: Initialize EmulatorBridge
+
+The `EmulatorBridge` class provides a Swift-friendly interface to the C API:
+
+```swift ContentView.swift
+import SwiftUI
+
+struct ContentView: View {
+    @StateObject private var state = EmulatorState()
+    
+    var body: some View {
+        ZStack {
+            if state.romLoaded {
+                EmulatorView(state: state)
+            } else {
+                RomLoadingView(state: state)
+            }
+        }
+        .onAppear {
+            // Create emulator instance
+            _ = state.emulator.create()
+            
+            // Try to restore last session
+            state.tryRestoreLastSession()
+        }
+    }
+}
+
+class EmulatorState: ObservableObject {
+    let emulator = EmulatorBridge()
+    @Published var romLoaded = false
+    @Published var isRunning = false
+    @Published var screenImage: CGImage?
+    
+    init() {
+        // Initialize backend from saved preference
+        if let preferred = EmulatorPreferences.getEffectiveBackend() {
+            _ = EmulatorBridge.setBackend(preferred)
+        }
+    }
+    
+    deinit {
+        emulator.destroy()
+    }
+}
+```
+
+### Step 2: Load ROM and Start Emulation
+
+```swift Loading ROM
+// Load ROM from Data
+func loadRom(_ data: Data, name: String) {
+    let result = emulator.loadRom(data)
+    
+    if result == 0 {
+        romLoaded = true
+        romName = name
+        romSize = data.count
+        
+        // Try to restore saved state
+        let hash = StateManager.shared.romHash(data)
+        if StateManager.shared.loadState(emulator: emulator, romHash: hash) {
+            print("State restored")
+        } else {
+            print("No saved state, waiting for ON key press")
+        }
+        
+        isRunning = true
+        startEmulation()
+    } else {
+        print("Failed to load ROM: error \(result)")
+    }
+}
+```
+
+### Step 3: Run the Emulation Loop
+
+Use Swift's Task API for the emulation loop:
+
+```swift Emulation Loop
+func startEmulation() {
+    emulationTask = Task.detached(priority: .userInitiated) { [weak self] in
+        guard let self = self else { return }
+        
+        while !Task.isCancelled {
+            let running = await MainActor.run { self.isRunning }
+            guard running else {
+                try? await Task.sleep(nanoseconds: 16_000_000)  // 16ms
+                continue
+            }
+            
+            let frameStart = Date()
+            
+            // Run 800,000 cycles per frame (48MHz / 60 FPS)
+            let cycles = await MainActor.run { self.cyclesPerTick }  // 800,000
+            let executed = self.emulator.runCycles(cycles)
+            
+            await MainActor.run {
+                self.totalCyclesExecuted += Int64(executed)
+                self.frameCounter += 1
+                self.screenImage = self.emulator.makeImage()
+                self.isLcdOn = self.emulator.isLcdOn()
+            }
+            
+            // Cap at 60 FPS
+            let elapsed = Date().timeIntervalSince(frameStart)
+            let remaining = 0.016 - elapsed
+            if remaining > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            }
+        }
+    }
+}
+
+func stopEmulation() {
+    emulationTask?.cancel()
+    emulationTask = nil
+}
+```
+
+### Step 4: Render the Display
+
+The emulator provides a framebuffer as a CGImage:
+
+```swift Rendering
+// Get screen image
+if let screenImage = state.screenImage {
+    Image(decorative: screenImage, scale: 1.0)
+        .interpolation(.none)  // Nearest-neighbor for pixels
+        .aspectRatio(contentMode: .fit)
+        .frame(width: 320, height: 240)
+} else {
+    // Black screen (LCD off)
+    Rectangle()
+        .fill(Color.black)
+        .frame(width: 320, height: 240)
+}
+```
+
+The `EmulatorBridge.makeImage()` method creates a CGImage directly from the framebuffer:
+
+```swift EmulatorBridge.swift
+func makeImage() -> CGImage? {
+    let (fb, w, h) = framebuffer()
+    guard let fb = fb, w > 0, h > 0 else { return nil }
+    
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let bitmapInfo = CGBitmapInfo(
+        rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | 
+                  CGBitmapInfo.byteOrder32Little.rawValue
+    )
+    
+    guard let context = CGContext(
+        data: UnsafeMutableRawPointer(mutating: fb),
+        width: Int(w),
+        height: Int(h),
+        bitsPerComponent: 8,
+        bytesPerRow: Int(w) * 4,
+        space: colorSpace,
+        bitmapInfo: bitmapInfo.rawValue
+    ) else { return nil }
+    
+    return context.makeImage()
+}
+```
+
+### Step 5: Handle Keyboard Input
+
+The TI-84 Plus CE uses an 8×7 key matrix:
+
+```swift Key Input
+// Press a key
+emulator.setKey(row: 6, col: 0, down: true)  // ENTER key
+
+// Release a key
+emulator.setKey(row: 6, col: 0, down: false)
+
+// Example: Handle key press in a button
+Button("ENTER") {
+    emulator.setKey(row: 6, col: 0, down: true)
+}
+.simultaneousGesture(
+    DragGesture(minimumDistance: 0)
+        .onEnded { _ in
+            emulator.setKey(row: 6, col: 0, down: false)
+        }
+)
+```
+
+<Accordion title="Key Matrix Reference">
+  Common key positions:
+  - ON key: `(2, 0)`
+  - ENTER key: `(6, 0)`
+  - Arrow keys: Down `(7, 0)`, Left `(7, 1)`, Right `(7, 2)`, Up `(7, 3)`
+  - Number keys: `0` is `(3, 0)`, `1` is `(3, 1)`, ..., `9` is `(5, 3)`
+  - Math: `+` is `(6, 1)`, `-` is `(6, 2)`, `×` is `(6, 3)`, `÷` is `(6, 4)`
+  
+  See `source/ios/Calc/Models/KeyDef.swift` for the complete key map.
+</Accordion>
+
+### Step 6: State Persistence
+
+Save and restore emulator state across app launches:
+
+```swift State Management
+// Save state
+func saveState() -> Bool {
+    guard let hash = currentRomHash else { return false }
+    
+    if let stateData = emulator.saveState() {
+        return StateManager.shared.saveState(
+            stateData,
+            romHash: hash
+        )
+    }
+    return false
+}
+
+// Load state
+func loadState() {
+    guard let hash = currentRomHash else { return }
+    
+    if StateManager.shared.loadState(
+        emulator: emulator,
+        romHash: hash
+    ) {
+        print("State restored")
+    }
+}
+
+// Lifecycle integration
+class AppState: ObservableObject {
+    var emulatorState: EmulatorState?
+    
+    func handleScenePhaseChange(_ phase: ScenePhase) {
+        switch phase {
+        case .background:
+            // Save state when going to background
+            _ = emulatorState?.saveState()
+        case .active:
+            // Resume emulation
+            emulatorState?.isRunning = true
+        default:
+            break
+        }
+    }
+}
+```
+
+### Step 7: Loading Program Files
+
+Inject `.8xp` (programs) or `.8xv` (app variables) into the calculator's flash:
+
+```swift Program Loading
+// Load ROM first
+emulator.loadRom(romData)
+
+// Inject program files BEFORE powering on
+if let programData = try? Data(contentsOf: programURL) {
+    let count = emulator.sendFile(programData)
+    
+    if count >= 0 {
+        print("Injected \(count) entries")
+    } else {
+        print("Failed to inject file: error \(count)")
+    }
+}
+
+// Now power on - programs will appear in the PRGM menu
+emulator.powerOn()
+```
+
+## Backend Switching
+
+The iOS app supports runtime backend switching when multiple backends are linked:
+
+```swift Backend Switching
+// Get available backends
+let backends = EmulatorBridge.getAvailableBackends()  // ["rust", "cemu"]
+
+// Check if switching is available
+if EmulatorBridge.isBackendSwitchingAvailable() {
+    // Get current backend
+    let current = EmulatorBridge.getCurrentBackend()  // "rust"
+    
+    // Switch backend (must destroy current instance first)
+    emulator.destroy()
+    
+    if EmulatorBridge.setBackend("cemu") {
+        // Recreate emulator with new backend
+        _ = emulator.create()
+        
+        // Reload ROM
+        _ = emulator.loadRom(romData)
+    }
+}
+```
+
+<Warning>
+  Switching backends destroys the current emulator instance. Save any state before switching.
+</Warning>
+
+## Native Integration (C API)
+
+The Swift bridge calls C functions defined in `core/include/emu.h`:
+
+### C API Functions
+
+```c emu.h
+typedef struct Emu Emu;
+
+// Lifecycle
+Emu* emu_create(void);
+void emu_destroy(Emu* emu);
+
+// ROM loading
+int32_t emu_load_rom(Emu* emu, const uint8_t* data, size_t size);
+int32_t emu_send_file(Emu* emu, const uint8_t* data, size_t size);
+
+// Execution
+void emu_reset(Emu* emu);
+void emu_power_on(Emu* emu);
+int32_t emu_run_cycles(Emu* emu, int32_t cycles);
+
+// Display
+const uint32_t* emu_framebuffer(Emu* emu, int32_t* out_width, int32_t* out_height);
+uint8_t emu_get_backlight(Emu* emu);
+uint8_t emu_is_lcd_on(Emu* emu);
+
+// Input
+void emu_set_key(Emu* emu, int32_t row, int32_t col, uint8_t down);
+
+// State persistence
+size_t emu_save_state_size(Emu* emu);
+int32_t emu_save_state(Emu* emu, uint8_t* out_data, size_t size);
+int32_t emu_load_state(Emu* emu, const uint8_t* data, size_t size);
+
+// Backend management
+const char* emu_backend_get_available(void);
+int emu_backend_count(void);
+const char* emu_backend_get_current(void);
+int emu_backend_set(const char* name);
+```
+
+### Swift to C Bridging
+
+The `EmulatorBridge.swift` class wraps the C API:
+
+```swift EmulatorBridge.swift
+class EmulatorBridge {
+    private var handle: OpaquePointer?
+    private let lock = NSLock()
+    
+    func create() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        handle = emu_create()
+        return handle != nil
+    }
+    
+    func loadRom(_ data: Data) -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        guard let h = handle else { return -1 }
+        
+        return data.withUnsafeBytes { bytes in
+            guard let ptr = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return -2
+            }
+            return emu_load_rom(h, ptr, data.count)
+        }
+    }
+    
+    func runCycles(_ cycles: Int32) -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        guard let h = handle else { return 0 }
+        return emu_run_cycles(h, cycles)
+    }
+}
+```
+
+### Bridging Header
+
+Add the C header to your bridging header (`ios/Calc-Bridging-Header.h`):
+
+```c Bridging Header
+#ifndef Calc_Bridging_Header_h
+#define Calc_Bridging_Header_h
+
+#import "emu.h"
+
+#endif
+```
+
+## Xcode Project Configuration
+
+### Linking Backend Libraries
+
+In Xcode, configure the schemes to link the appropriate backend libraries:
+
+**Calc-Rust scheme:**
+- Links `libemu_rust.a` from `core/target/aarch64-apple-ios/release/`
+
+**Calc-CEmu scheme:**
+- Links `libemu_cemu.a` from `core/target/aarch64-apple-ios/release/`
+
+**Calc-Both scheme:**
+- Links both `libemu_rust.a` and `libemu_cemu.a`
+- Includes `backend_bridge.c` for runtime switching
+
+### Build Settings
+
+1. **Library Search Paths**: `$(PROJECT_DIR)/../core/target/$(RUST_TARGET)/release`
+2. **Header Search Paths**: `$(PROJECT_DIR)/../core/include`
+3. **Other Linker Flags**: `-lemu_rust` or `-lemu_cemu` (or both)
+
+## Performance Tuning
+
+### Cycle Budget
+
+At 48MHz and 60 FPS, each frame should execute ~800,000 cycles:
+
+```swift Performance Tuning
+// Real-time (1x speed)
+var cyclesPerTick: Int32 { Int32(800_000) }
+
+// With speed multiplier
+var speedMultiplier: Float = 1.0
+var cyclesPerTick: Int32 {
+    Int32(800_000 * speedMultiplier)
+}
+```
+
+### Display Updates
+
+Only update the screen when the LCD is on:
+
+```swift Display Check
+if emulator.isLcdOn() {
+    screenImage = emulator.makeImage()
+} else {
+    // Show black screen
+    screenImage = nil
+}
+```
+
+### Background Execution
+
+Pause emulation when the app goes to background:
+
+```swift Lifecycle
+@Environment(\.scenePhase) var scenePhase
+
+var body: some View {
+    // ...
+    .onChange(of: scenePhase) { phase in
+        switch phase {
+        case .background:
+            state.isRunning = false
+            _ = state.saveState()
+        case .active:
+            state.isRunning = true
+        default:
+            break
+        }
+    }
+}
+```
+
+## Example App
+
+The reference implementation is available at `source/ios/`:
+
+- **ContentView.swift** - Main view with state management
+- **EmulatorView.swift** - Emulator display and controls
+- **EmulatorBridge.swift** - Swift wrapper around C API
+- **StateManager.swift** - State persistence to app storage
+- **KeypadView.swift** - On-screen keypad with touch handling
+
+## API Reference
+
+### EmulatorBridge Methods
+
+<ParamField path="create()" type="Bool">
+  Create the emulator instance. Must be called before any other operations.
+  
+  **Returns:** `true` on success, `false` on failure
+</ParamField>
+
+<ParamField path="destroy()" type="Void">
+  Destroy the emulator instance and free resources.
+</ParamField>
+
+<ParamField path="loadRom(_ data: Data)" type="Int32">
+  Load ROM data into the emulator.
+  
+  **Parameters:**
+  - `data`: ROM file contents (typically 4MB for TI-84 Plus CE)
+  
+  **Returns:** `0` on success, negative error code on failure
+</ParamField>
+
+<ParamField path="sendFile(_ data: Data)" type="Int32">
+  Inject a `.8xp` or `.8xv` file into flash. Must be called after `loadRom()` and before `powerOn()`.
+  
+  **Parameters:**
+  - `data`: Program or AppVar file contents
+  
+  **Returns:** Number of entries injected (≥0), or negative error code
+</ParamField>
+
+<ParamField path="powerOn()" type="Void">
+  Simulate ON key press+release to start execution. Call after `loadRom()`.
+</ParamField>
+
+<ParamField path="reset()" type="Void">
+  Reset the emulator to initial state (cold boot).
+</ParamField>
+
+<ParamField path="runCycles(_ cycles: Int32)" type="Int32">
+  Run emulation for the specified number of CPU cycles.
+  
+  **Parameters:**
+  - `cycles`: Number of cycles to execute (typically 800,000 per frame)
+  
+  **Returns:** Number of cycles actually executed
+</ParamField>
+
+<ParamField path="makeImage()" type="CGImage?">
+  Create a CGImage from the current framebuffer.
+  
+  **Returns:** CGImage of the screen (320×240 ARGB), or nil if unavailable
+</ParamField>
+
+<ParamField path="framebuffer()" type="(UnsafePointer<UInt32>?, Int32, Int32)">
+  Get direct access to the framebuffer.
+  
+  **Returns:** Tuple of (pointer to ARGB pixels, width, height)
+</ParamField>
+
+<ParamField path="setKey(row: Int32, col: Int32, down: Bool)" type="Void">
+  Set key state in the 8×7 key matrix.
+  
+  **Parameters:**
+  - `row`: Key row (0-7)
+  - `col`: Key column (0-7)
+  - `down`: `true` if pressed, `false` if released
+</ParamField>
+
+<ParamField path="isLcdOn()" type="Bool">
+  Check if the LCD is on (should display content).
+  
+  **Returns:** `true` if LCD is active, `false` if off or sleeping
+</ParamField>
+
+<ParamField path="getBacklight()" type="UInt8">
+  Get the backlight brightness level.
+  
+  **Returns:** 0-255 (0 = off/black)
+</ParamField>
+
+<ParamField path="saveState()" type="Data?">
+  Save the current emulator state.
+  
+  **Returns:** State data, or nil on failure
+</ParamField>
+
+<ParamField path="loadState(_ data: Data)" type="Int32">
+  Load a saved emulator state.
+  
+  **Parameters:**
+  - `data`: Previously saved state data
+  
+  **Returns:** `0` on success, negative error code on failure
+</ParamField>
+
+### Static Backend Methods
+
+<ParamField path="EmulatorBridge.getAvailableBackends()" type="[String]">
+  Get the list of available backends.
+  
+  **Returns:** Array of backend names (e.g., `["rust", "cemu"]`)
+</ParamField>
+
+<ParamField path="EmulatorBridge.getCurrentBackend()" type="String?">
+  Get the current backend name.
+  
+  **Returns:** Current backend name, or nil if no backend is loaded
+</ParamField>
+
+<ParamField path="EmulatorBridge.setBackend(_ name: String)" type="Bool">
+  Set the active backend. Must be called before creating an emulator instance.
+  
+  **Parameters:**
+  - `name`: Backend name (`"rust"` or `"cemu"`)
+  
+  **Returns:** `true` if successful
+</ParamField>
+
+<ParamField path="EmulatorBridge.isBackendSwitchingAvailable()" type="Bool">
+  Check if backend switching is available (multiple backends linked).
+  
+  **Returns:** `true` if more than one backend is available
+</ParamField>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Build fails: Library not found">
+    Ensure you built the backend library first:
+    ```bash
+    ./scripts/build.sh ios --sim
+    ```
+    Then verify the library exists at `core/target/aarch64-apple-ios-sim/release/libemu_rust.a`
+  </Accordion>
+  
+  <Accordion title="App crashes on startup with symbol not found">
+    Check that the Xcode scheme is linking the correct backend library:
+    - **Calc-Rust**: Links `libemu_rust.a`
+    - **Calc-CEmu**: Links `libemu_cemu.a`
+    
+    Verify in Xcode: **Build Phases → Link Binary With Libraries**
+  </Accordion>
+  
+  <Accordion title="Emulator runs slowly or stutters">
+    - Reduce the cycle count: try 400,000 cycles per frame (0.5x speed)
+    - Build in Release mode: use the Release scheme in Xcode
+    - Profile with Instruments (Time Profiler)
+  </Accordion>
+  
+  <Accordion title="Screen stays black after loading ROM">
+    Call `powerOn()` after loading the ROM to simulate pressing the ON key:
+    ```swift
+    emulator.loadRom(romData)
+    emulator.powerOn()  // Don't forget this!
+    ```
+  </Accordion>
+  
+  <Accordion title="Cannot switch backends at runtime">
+    Ensure you're using the **Calc-Both** scheme, which includes both backend libraries and the runtime bridge.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Android Integration" icon="android" href="/platforms/android">
+    Learn how to integrate the emulator into Android apps with Kotlin
+  </Card>
+  <Card title="Web Integration" icon="globe" href="/platforms/web">
+    Build a web version using WebAssembly
+  </Card>
+</CardGroup>

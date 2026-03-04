@@ -1,0 +1,429 @@
+---
+title: Platform-Specific Builds
+description: Manual build instructions and platform-specific setup for Android, iOS, and Web
+---
+
+This guide covers manual build steps for each platform without using the unified build script. Useful for IDE integration, debugging, and advanced configurations.
+
+## Android
+
+### Manual Gradle Build
+
+You can build the Android app directly using Gradle without the build script.
+
+#### Build Commands
+
+```bash
+cd android
+
+# Debug build (default: Rust backend, arm64 only)
+./gradlew assembleDebug
+
+# Release build
+./gradlew assembleRelease
+
+# Install to device
+./gradlew installDebug
+```
+
+#### Backend Selection
+
+Control which backend to build using Gradle properties:
+
+```bash
+# Rust backend only (default)
+./gradlew assembleRelease -PbuildRust=true -PbuildCemu=false
+
+# CEmu backend only
+./gradlew assembleRelease -PbuildRust=false -PbuildCemu=true
+
+# Both backends (runtime switching)
+./gradlew assembleRelease -PbuildRust=true -PbuildCemu=true
+```
+
+#### ABI Selection
+
+By default, only ARM64 is built. To build all ABIs:
+
+```bash
+# Build all ABIs
+./gradlew assembleRelease
+
+# Build ARM64 only (smaller APK)
+./gradlew assembleRelease -PabiFilters=arm64-v8a
+```
+
+### Android Studio
+
+**Opening the Project**
+
+1. Open Android Studio
+2. Select **File → Open**
+3. Navigate to the `android/` directory
+4. Click **Open**
+
+**Building in Android Studio**
+
+1. Select **Build → Make Project** (or press `Cmd+F9`)
+2. The app will compile with default settings (Rust backend, ARM64)
+
+**Running on Device/Emulator**
+
+1. Select **Run → Run 'app'** (or press `Ctrl+R`)
+2. Choose a device or emulator
+3. The app will install and launch
+
+**Changing Backend in Android Studio**
+
+Edit `android/gradle.properties`:
+
+```properties
+# Rust backend only
+buildRust=true
+buildCemu=false
+
+# CEmu backend only
+buildRust=false
+buildCemu=true
+
+# Both backends
+buildRust=true
+buildCemu=true
+```
+
+### Native Library Locations
+
+Compiled native libraries are placed in:
+
+```
+android/app/build/intermediates/cmake/release/obj/
+├── arm64-v8a/
+│   └── libemu_native.so
+├── armeabi-v7a/
+│   └── libemu_native.so
+├── x86_64/
+│   └── libemu_native.so
+└── x86/
+    └── libemu_native.so
+```
+
+### Development Workflow
+
+For rapid iteration with auto-deploy:
+
+```bash
+# Terminal 1: Watch Kotlin changes and auto-deploy
+cd android
+./watch.sh  # Requires fswatch: brew install fswatch
+
+# Terminal 2: When changing Rust code
+./scripts/build.sh android --debug --install
+```
+
+## iOS
+
+### Building with Xcode
+
+The iOS app must be built with Xcode after compiling the backend library.
+
+#### Step 1: Build Backend Library
+
+First, compile the Rust and/or CEmu backend:
+
+```bash
+# For device (Rust backend)
+./scripts/build.sh ios
+
+# For simulator (Rust backend)
+./scripts/build.sh ios --sim
+
+# For device (both backends)
+./scripts/build.sh ios --both
+```
+
+#### Step 2: Open Xcode
+
+```bash
+open ios/Calc.xcodeproj
+```
+
+#### Step 3: Select Scheme
+
+Xcode includes three schemes depending on which backend you built:
+
+- **Calc-Rust** - Rust backend only (requires `libemu_rust.a`)
+- **Calc-CEmu** - CEmu backend only (requires `libemu_cemu.a`)
+- **Calc-Both** - Both backends with runtime switching
+
+Select the appropriate scheme from the scheme selector at the top of Xcode.
+
+#### Step 4: Build and Run
+
+Press `Cmd+R` to build and run the app.
+
+### Manual Backend Compilation
+
+#### Rust Backend
+
+```bash
+cd core
+
+# For device
+rustup target add aarch64-apple-ios
+cargo build --release --target aarch64-apple-ios --features ios_prefixed
+cp target/aarch64-apple-ios/release/libemu_core.a target/aarch64-apple-ios/release/libemu_rust.a
+
+# For simulator (Apple Silicon)
+rustup target add aarch64-apple-ios-sim
+cargo build --release --target aarch64-apple-ios-sim --features ios_prefixed
+cp target/aarch64-apple-ios-sim/release/libemu_core.a target/aarch64-apple-ios-sim/release/libemu_rust.a
+
+# For simulator (Intel)
+rustup target add x86_64-apple-ios
+cargo build --release --target x86_64-apple-ios --features ios_prefixed
+cp target/x86_64-apple-ios/release/libemu_core.a target/x86_64-apple-ios/release/libemu_rust.a
+```
+
+The `ios_prefixed` feature exports symbols with `rust_` prefix (e.g., `rust_emu_create`) for dual-backend builds.
+
+#### CEmu Backend
+
+The CEmu backend is built using CMake and compiled as a static library:
+
+```bash
+mkdir -p ios/cemu/build-device
+cd ios/cemu/build-device
+
+cmake .. -G Xcode \
+    -DCMAKE_SYSTEM_NAME=iOS \
+    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
+
+cmake --build . --config Release
+
+cp Release-iphoneos/libcemu_adapter.a ../../../core/target/aarch64-apple-ios/release/libemu_cemu.a
+```
+
+For simulator, add `-DCMAKE_OSX_SYSROOT=iphonesimulator`.
+
+### Xcode Build Settings
+
+Key settings in the Xcode project:
+
+**Library Search Paths** (per scheme):
+
+```
+$(PROJECT_DIR)/../core/target/aarch64-apple-ios/$(CONFIGURATION)
+$(PROJECT_DIR)/../core/target/aarch64-apple-ios-sim/$(CONFIGURATION)
+$(PROJECT_DIR)/../core/target/x86_64-apple-ios/$(CONFIGURATION)
+```
+
+**Linked Libraries** (per scheme):
+
+- Calc-Rust: `libemu_rust.a`
+- Calc-CEmu: `libemu_cemu.a`
+- Calc-Both: `libemu_rust.a` + `libemu_cemu.a`
+
+**Header Search Paths:**
+
+```
+$(PROJECT_DIR)/../core/include
+```
+
+## Web
+
+### Manual Build Steps
+
+The web app uses Vite and requires building the WASM package first.
+
+#### Step 1: Build WASM Package
+
+```bash
+cd core
+
+# Build Rust WASM
+wasm-pack build --target web --release
+```
+
+This generates the WASM package in `core/pkg/`:
+
+```
+core/pkg/
+├── emu_core.js
+├── emu_core_bg.wasm
+├── emu_core_bg.wasm.d.ts
+├── emu_core.d.ts
+└── package.json
+```
+
+#### Step 2: Copy to Web App
+
+```bash
+rm -rf web/src/emu-core
+cp -r core/pkg web/src/emu-core
+```
+
+#### Step 3: Install Dependencies
+
+```bash
+cd web
+npm install
+```
+
+#### Step 4: Build or Run
+
+```bash
+# Development server with hot reload
+npm run dev
+
+# Production build
+npm run build
+# Output in web/dist/
+
+# Preview production build
+npm run preview
+```
+
+### Development Server
+
+For development with hot reload:
+
+```bash
+make web-dev
+# or
+cd web && npm run dev
+```
+
+The dev server runs at `http://localhost:5173`.
+
+### CEmu Web Backend
+
+To build with CEmu WASM backend (requires Emscripten):
+
+```bash
+make web-cemu
+```
+
+This:
+1. Builds CEmu core with Emscripten
+2. Generates `WebCEmu.js` and `WebCEmu.wasm`
+3. Copies files to `web/src/cemu-core/`
+
+### Production Build
+
+```bash
+make web
+# or
+cd web && npm run build
+```
+
+Optimized output is placed in `web/dist/`. Serve with:
+
+```bash
+cd web/dist
+python3 -m http.server 8000
+# or
+npx serve
+```
+
+### WASM Package Size
+
+The optimized WASM package is approximately:
+
+- **Rust WASM**: ~96KB gzipped
+- **CEmu WASM**: ~180KB gzipped
+
+## Make Targets Summary
+
+Quick reference for all platform builds:
+
+```bash
+# Android
+make android              # Release, Rust, arm64
+make android-debug        # Debug, Rust, arm64
+make android-install      # Release + install, all ABIs
+make android-both         # Both backends
+make android-cemu         # CEmu only
+
+# iOS (then open Xcode)
+make ios                  # Device, Rust
+make ios-sim              # Simulator, Rust
+make ios-both             # Device, both backends
+make ios-sim-both         # Simulator, both backends
+make ios-cemu             # Device, CEmu
+
+# Web
+make web                  # Production build (Rust)
+make web-dev              # Dev server
+make web-cemu             # Production build (CEmu)
+make web-clean            # Clean artifacts
+
+# Utilities
+make test                 # Run Rust tests
+make clean                # Clean all artifacts
+make help                 # Show all targets
+```
+
+## Troubleshooting
+
+### Gradle Build Fails
+
+**CMake error or stale native build:**
+
+```bash
+cd android
+rm -rf app/.cxx app/build/intermediates/cmake
+./gradlew clean
+./gradlew assembleDebug
+```
+
+### Xcode Build Fails
+
+**Library not found:**
+
+Ensure you built the backend library first:
+
+```bash
+./scripts/build.sh ios --sim  # or --device
+```
+
+**Wrong architecture:**
+
+Make sure the simulator/device matches your build target:
+- Apple Silicon Mac → use `--sim` with `aarch64-apple-ios-sim`
+- Intel Mac → use `--sim` with `x86_64-apple-ios`
+- Physical device → use device target with `aarch64-apple-ios`
+
+### WASM Build Fails
+
+**wasm-pack not found:**
+
+```bash
+cargo install wasm-pack
+```
+
+**Target not installed:**
+
+```bash
+rustup target add wasm32-unknown-unknown
+```
+
+### CEmu Build Fails
+
+**cemu-ref not found:**
+
+```bash
+git clone https://github.com/CE-Programming/CEmu.git cemu-ref
+```
+
+**Emscripten not found (web):**
+
+```bash
+brew install emscripten  # macOS
+```
+
+## Next Steps
+
+- [Testing](/testing) - Run tests to verify your build
+- [Development Workflow](/development/workflow) - Set up your development environment
+- [Debugging](/development/debugging) - Debug the emulator core

@@ -1,0 +1,486 @@
+---
+title: State Management
+description: Save and load complete emulator state for save states and debugging
+---
+
+The state management API allows you to save and restore the complete emulator state, enabling features like save states, rewind, and debugging.
+
+## emu_save_state_size
+
+Get the buffer size needed for a save state.
+
+```c
+size_t emu_save_state_size(const SyncEmu* emu);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+
+### Returns
+
+- **> 0**: Number of bytes required for save state buffer
+- **0**: Invalid emulator pointer
+
+### Description
+
+Returns the exact number of bytes needed to store the complete emulator state. This includes CPU registers, RAM, VRAM, peripheral states, and all internal emulator state.
+
+The size is constant for a given emulator configuration and typically around 4-5 MB (4MB ROM + RAM + state).
+
+### Example
+
+```c
+// Allocate buffer for save state
+size_t size = emu_save_state_size(emu);
+if (size == 0) {
+    fprintf(stderr, "Invalid emulator\n");
+    return;
+}
+
+printf("Save state size: %zu bytes (%.2f MB)\n",
+       size, size / (1024.0 * 1024.0));
+
+uint8_t* buffer = malloc(size);
+if (!buffer) {
+    fprintf(stderr, "Failed to allocate save state buffer\n");
+    return;
+}
+```
+
+---
+
+## emu_save_state
+
+Save the complete emulator state to a buffer.
+
+```c
+int emu_save_state(const SyncEmu* emu, uint8_t* out, size_t cap);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+- **out**: Output buffer for save state data
+- **cap**: Capacity of output buffer in bytes
+
+### Returns
+
+- **> 0**: Number of bytes written to buffer
+- **-1**: Invalid parameter (null pointer)
+- **Negative error code**: Save failure
+
+### Description
+
+Serializes the complete emulator state to a byte buffer. The saved state includes:
+
+- **CPU state**: All registers (AF, BC, DE, HL, IX, IY, SP, PC, etc.)
+- **Memory**: Flash ROM, RAM, VRAM
+- **Peripherals**: LCD, timers, keypad, interrupt controller, etc.
+- **Internal state**: Cycle counters, scheduler events, flags
+
+The buffer must be large enough to hold the entire state (use `emu_save_state_size()` to determine size).
+
+### Example: Save to Memory
+
+```c
+size_t size = emu_save_state_size(emu);
+uint8_t* buffer = malloc(size);
+
+int written = emu_save_state(emu, buffer, size);
+if (written < 0) {
+    fprintf(stderr, "Failed to save state: %d\n", written);
+    free(buffer);
+    return;
+}
+
+printf("Saved %d bytes\n", written);
+```
+
+### Example: Save to File
+
+```c
+#include <stdio.h>
+
+int save_state_to_file(SyncEmu* emu, const char* filename) {
+    // Get required size
+    size_t size = emu_save_state_size(emu);
+    if (size == 0) {
+        return -1;
+    }
+    
+    // Allocate buffer
+    uint8_t* buffer = malloc(size);
+    if (!buffer) {
+        return -1;
+    }
+    
+    // Save state to buffer
+    int written = emu_save_state(emu, buffer, size);
+    if (written < 0) {
+        free(buffer);
+        return written;
+    }
+    
+    // Write to file
+    FILE* f = fopen(filename, "wb");
+    if (!f) {
+        free(buffer);
+        return -1;
+    }
+    
+    size_t wrote = fwrite(buffer, 1, written, f);
+    fclose(f);
+    free(buffer);
+    
+    if (wrote != (size_t)written) {
+        return -1;
+    }
+    
+    printf("Saved state to %s (%d bytes)\n", filename, written);
+    return 0;
+}
+```
+
+---
+
+## emu_load_state
+
+Load emulator state from a buffer.
+
+```c
+int emu_load_state(SyncEmu* emu, const uint8_t* data, size_t len);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+- **data**: Buffer containing saved state data
+- **len**: Size of data buffer in bytes
+
+### Returns
+
+- **0**: Success
+- **-1**: Invalid parameter (null pointer)
+- **Negative error code**: Load failure
+
+### Description
+
+Restores the complete emulator state from a buffer previously created with `emu_save_state()`. After loading, the emulator continues execution from the exact point where the state was saved.
+
+The state buffer must be valid and match the current emulator version. Loading an incompatible state will fail.
+
+### Example: Load from Memory
+
+```c
+int result = emu_load_state(emu, buffer, buffer_size);
+if (result != 0) {
+    fprintf(stderr, "Failed to load state: %d\n", result);
+    return;
+}
+
+printf("State loaded successfully\n");
+
+// Continue execution from saved point
+emu_run_cycles(emu, 250000);
+```
+
+### Example: Load from File
+
+```c
+int load_state_from_file(SyncEmu* emu, const char* filename) {
+    // Open file
+    FILE* f = fopen(filename, "rb");
+    if (!f) {
+        fprintf(stderr, "Failed to open %s\n", filename);
+        return -1;
+    }
+    
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    // Read file
+    uint8_t* buffer = malloc(size);
+    if (!buffer) {
+        fclose(f);
+        return -1;
+    }
+    
+    size_t read = fread(buffer, 1, size, f);
+    fclose(f);
+    
+    if (read != size) {
+        free(buffer);
+        return -1;
+    }
+    
+    // Load state
+    int result = emu_load_state(emu, buffer, size);
+    free(buffer);
+    
+    if (result == 0) {
+        printf("Loaded state from %s\n", filename);
+    }
+    
+    return result;
+}
+```
+
+---
+
+## Complete Save State System
+
+### Example: Multiple Save Slots
+
+```c
+#define MAX_SLOTS 10
+
+typedef struct {
+    uint8_t* data;
+    size_t size;
+    time_t timestamp;
+    int valid;
+} SaveSlot;
+
+typedef struct {
+    SaveSlot slots[MAX_SLOTS];
+    size_t state_size;
+} SaveStateManager;
+
+SaveStateManager* ssm_create(SyncEmu* emu) {
+    SaveStateManager* ssm = calloc(1, sizeof(SaveStateManager));
+    ssm->state_size = emu_save_state_size(emu);
+    
+    // Pre-allocate buffers for all slots
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        ssm->slots[i].data = malloc(ssm->state_size);
+        ssm->slots[i].size = ssm->state_size;
+        ssm->slots[i].valid = 0;
+    }
+    
+    return ssm;
+}
+
+int ssm_save(SaveStateManager* ssm, SyncEmu* emu, int slot) {
+    if (slot < 0 || slot >= MAX_SLOTS) {
+        return -1;
+    }
+    
+    SaveSlot* s = &ssm->slots[slot];
+    
+    int written = emu_save_state(emu, s->data, s->size);
+    if (written < 0) {
+        return written;
+    }
+    
+    s->timestamp = time(NULL);
+    s->valid = 1;
+    
+    printf("Saved to slot %d\n", slot);
+    return 0;
+}
+
+int ssm_load(SaveStateManager* ssm, SyncEmu* emu, int slot) {
+    if (slot < 0 || slot >= MAX_SLOTS) {
+        return -1;
+    }
+    
+    SaveSlot* s = &ssm->slots[slot];
+    
+    if (!s->valid) {
+        fprintf(stderr, "Slot %d is empty\n", slot);
+        return -1;
+    }
+    
+    int result = emu_load_state(emu, s->data, s->size);
+    if (result == 0) {
+        printf("Loaded from slot %d\n", slot);
+    }
+    
+    return result;
+}
+
+void ssm_destroy(SaveStateManager* ssm) {
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        free(ssm->slots[i].data);
+    }
+    free(ssm);
+}
+```
+
+### Example: Rewind Buffer
+
+```c
+#define REWIND_BUFFER_SIZE 100  // Store last 100 frames
+
+typedef struct {
+    uint8_t** states;
+    size_t state_size;
+    int capacity;
+    int count;
+    int write_pos;
+} RewindBuffer;
+
+RewindBuffer* rewind_create(SyncEmu* emu, int capacity) {
+    RewindBuffer* rb = malloc(sizeof(RewindBuffer));
+    rb->state_size = emu_save_state_size(emu);
+    rb->capacity = capacity;
+    rb->count = 0;
+    rb->write_pos = 0;
+    
+    // Allocate circular buffer
+    rb->states = malloc(capacity * sizeof(uint8_t*));
+    for (int i = 0; i < capacity; i++) {
+        rb->states[i] = malloc(rb->state_size);
+    }
+    
+    return rb;
+}
+
+void rewind_push(RewindBuffer* rb, SyncEmu* emu) {
+    // Save current state to circular buffer
+    emu_save_state(emu, rb->states[rb->write_pos], rb->state_size);
+    
+    rb->write_pos = (rb->write_pos + 1) % rb->capacity;
+    if (rb->count < rb->capacity) {
+        rb->count++;
+    }
+}
+
+int rewind_pop(RewindBuffer* rb, SyncEmu* emu) {
+    if (rb->count == 0) {
+        return -1;  // Nothing to rewind to
+    }
+    
+    // Go back one frame
+    rb->write_pos = (rb->write_pos - 1 + rb->capacity) % rb->capacity;
+    rb->count--;
+    
+    // Load that state
+    return emu_load_state(emu, rb->states[rb->write_pos], rb->state_size);
+}
+
+void rewind_destroy(RewindBuffer* rb) {
+    for (int i = 0; i < rb->capacity; i++) {
+        free(rb->states[i]);
+    }
+    free(rb->states);
+    free(rb);
+}
+
+// Usage: Save every frame, rewind on button press
+void emulation_loop_with_rewind(SyncEmu* emu) {
+    RewindBuffer* rb = rewind_create(emu, REWIND_BUFFER_SIZE);
+    
+    while (running) {
+        // Normal execution
+        emu_run_cycles(emu, 250000);
+        
+        // Save state every frame
+        rewind_push(rb, emu);
+        
+        // Check for rewind button
+        if (button_pressed(BUTTON_REWIND)) {
+            // Rewind 5 frames
+            for (int i = 0; i < 5; i++) {
+                if (rewind_pop(rb, emu) != 0) {
+                    break;
+                }
+            }
+        }
+        
+        // Render...
+    }
+    
+    rewind_destroy(rb);
+}
+```
+
+### Example: Quick Save/Load (F5/F9 pattern)
+
+```c
+typedef struct {
+    uint8_t* quick_save;
+    size_t size;
+    int has_save;
+} QuickSaveManager;
+
+QuickSaveManager* qs_create(SyncEmu* emu) {
+    QuickSaveManager* qs = malloc(sizeof(QuickSaveManager));
+    qs->size = emu_save_state_size(emu);
+    qs->quick_save = malloc(qs->size);
+    qs->has_save = 0;
+    return qs;
+}
+
+void qs_save(QuickSaveManager* qs, SyncEmu* emu) {
+    int result = emu_save_state(emu, qs->quick_save, qs->size);
+    if (result > 0) {
+        qs->has_save = 1;
+        printf("Quick save created\n");
+    }
+}
+
+void qs_load(QuickSaveManager* qs, SyncEmu* emu) {
+    if (!qs->has_save) {
+        printf("No quick save available\n");
+        return;
+    }
+    
+    int result = emu_load_state(emu, qs->quick_save, qs->size);
+    if (result == 0) {
+        printf("Quick save loaded\n");
+    }
+}
+
+void qs_destroy(QuickSaveManager* qs) {
+    free(qs->quick_save);
+    free(qs);
+}
+
+// Usage with keyboard shortcuts
+void handle_quick_save_keys(SyncEmu* emu, QuickSaveManager* qs,
+                            SDL_Scancode key) {
+    if (key == SDL_SCANCODE_F5) {
+        qs_save(qs, emu);
+    } else if (key == SDL_SCANCODE_F9) {
+        qs_load(qs, emu);
+    }
+}
+```
+
+## State Compatibility
+
+Save states are version-specific:
+
+- **Format changes**: Save state format may change between emulator versions
+- **Validation**: The emulator validates state data before loading
+- **ROM matching**: State includes ROM data - must match loaded ROM
+- **Forward compatibility**: Newer versions cannot load older save states
+
+<Warning>
+Always save ROM and emulator version metadata alongside save states for compatibility tracking.
+</Warning>
+
+## Performance Considerations
+
+- **State size**: Typically 4-5 MB (depends on ROM size)
+- **Save time**: ~5-10ms (fast memory copy + serialization)
+- **Load time**: ~5-10ms (deserialization + memory copy)
+- **Compression**: Consider compressing saved states (zlib, etc.) for storage
+
+## Use Cases
+
+- **Save states**: Let users save progress at any point
+- **Rewind**: Store recent frames for frame-by-frame rewind
+- **Debugging**: Capture state at specific points for analysis
+- **Testing**: Save states at test checkpoints
+- **Netplay**: Sync state across networked instances
+
+## See Also
+
+- [Lifecycle](/api/lifecycle) - Create emulator before state operations
+- [Execution](/api/execution) - Continue execution after loading state
+- [ROM Management](/api/rom-management) - Load ROM before state operations

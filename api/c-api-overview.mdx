@@ -1,0 +1,151 @@
+---
+title: C API Overview
+description: Introduction to the TI-84 Plus CE emulator C ABI, thread safety, and usage patterns
+---
+
+The TI-84 Plus CE emulator core provides a stable C ABI for integration into various frontend applications. The API is designed to be platform-agnostic with no OS dependencies - all I/O is done through byte buffers.
+
+## Architecture
+
+The emulator uses a Rust core with C-compatible FFI exports. All state is encapsulated in an opaque `SyncEmu` structure that you interact with via pointers.
+
+```c
+// Opaque type - do not access fields directly
+typedef struct SyncEmu SyncEmu;
+```
+
+## Thread Safety
+
+The `SyncEmu` type is thread-safe. All operations are synchronized internally using a mutex, allowing safe concurrent access from multiple threads:
+
+- **UI thread**: Can call `emu_set_key()` for input events
+- **Emulation thread**: Can call `emu_run_cycles()` for execution
+- **Render thread**: Can call `emu_framebuffer()` to read display data
+
+The mutex prevents data races between these operations. However, be aware that `emu_framebuffer()` returns a pointer that is only valid while the mutex is held internally. Copy the framebuffer data immediately after the call returns.
+
+## Basic Usage Pattern
+
+```c
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+// 1. Create emulator instance
+SyncEmu* emu = emu_create();
+if (!emu) {
+    fprintf(stderr, "Failed to create emulator\n");
+    return 1;
+}
+
+// 2. Load ROM data
+uint8_t* rom_data = load_rom_file("TI-84-CE.rom", &rom_size);
+int result = emu_load_rom(emu, rom_data, rom_size);
+if (result != 0) {
+    fprintf(stderr, "Failed to load ROM: %d\n", result);
+    emu_destroy(emu);
+    return 1;
+}
+
+// 3. (Optional) Send files to calculator
+uint8_t* program = load_file("program.8xp", &program_size);
+int entries = emu_send_file(emu, program, program_size);
+if (entries < 0) {
+    fprintf(stderr, "Failed to send file: %d\n", entries);
+}
+
+// 4. Power on the calculator
+emu_power_on(emu);
+
+// 5. Main emulation loop
+while (running) {
+    // Run emulation (15 MHz = 15,000,000 cycles/sec)
+    // For 60 FPS: 15,000,000 / 60 = 250,000 cycles per frame
+    emu_run_cycles(emu, 250000);
+    
+    // Get framebuffer and render
+    int32_t width, height;
+    const uint32_t* fb = emu_framebuffer(emu, &width, &height);
+    render_display(fb, width, height);
+    
+    // Handle input
+    if (key_pressed(KEY_ENTER)) {
+        emu_set_key(emu, 6, 0, 1);  // Press ENTER
+    }
+    if (key_released(KEY_ENTER)) {
+        emu_set_key(emu, 6, 0, 0);  // Release ENTER
+    }
+}
+
+// 6. Cleanup
+emu_destroy(emu);
+```
+
+## Error Handling
+
+Most functions return error codes:
+
+- **0 or positive**: Success (may indicate count or bytes written)
+- **-1**: Invalid parameter (null pointer, invalid size)
+- **-10**: ROM not loaded
+- **-11**: Parse error (invalid file format)
+- **-12**: No flash space available
+- **-13**: Already booted (operation requires pre-boot state)
+
+Always check return values and handle errors appropriately.
+
+## Memory Management
+
+- **Emulator ownership**: The `SyncEmu` instance owns all internal state
+- **Caller ownership**: You own all buffers passed to the API (ROM data, save states, etc.)
+- **No leaks**: Always call `emu_destroy()` when done
+- **Copy framebuffer**: The framebuffer pointer is only valid during the call - copy data immediately
+
+## Timing Considerations
+
+The TI-84 Plus CE runs at 15 MHz (15,000,000 cycles per second). For real-time emulation at 60 FPS:
+
+```c
+#define CYCLES_PER_FRAME (15000000 / 60)  // 250,000 cycles
+
+while (running) {
+    uint64_t frame_start = get_time_us();
+    
+    int executed = emu_run_cycles(emu, CYCLES_PER_FRAME);
+    
+    // Render and handle events...
+    
+    // Sleep to maintain 60 FPS
+    uint64_t elapsed = get_time_us() - frame_start;
+    uint64_t frame_time = 1000000 / 60;  // 16.67ms
+    if (elapsed < frame_time) {
+        sleep_us(frame_time - elapsed);
+    }
+}
+```
+
+## API Categories
+
+The C API is organized into functional groups:
+
+- [Lifecycle](/api/lifecycle): Create, destroy, reset, and power on
+- [ROM Management](/api/rom-management): Load ROM and send files
+- [Execution](/api/execution): Run emulation cycles
+- [Display](/api/display): Access framebuffer and LCD state
+- [Input](/api/input): Send key events
+- [State](/api/state): Save and load emulator state
+
+## Platform-Specific Builds
+
+The API supports platform-specific symbol prefixes:
+
+- **Default**: `emu_create`, `emu_destroy`, etc.
+- **iOS builds** (with `ios_prefixed` feature): `rust_emu_create`, `rust_emu_destroy`, etc.
+
+This prevents symbol conflicts with other libraries on platforms with limited namespacing.
+
+## Next Steps
+
+- Learn about [lifecycle management](/api/lifecycle)
+- Explore [ROM loading](/api/rom-management)
+- Set up [execution loops](/api/execution)

@@ -1,0 +1,280 @@
+---
+title: Execution Control
+description: Run emulation cycles and control execution timing
+---
+
+The execution API controls the emulator's CPU execution and timing.
+
+## emu_run_cycles
+
+Run the emulator for a specified number of CPU cycles.
+
+```c
+int emu_run_cycles(SyncEmu* emu, int32_t cycles);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+- **cycles**: Number of CPU cycles to execute (must be > 0)
+
+### Returns
+
+- **>= 0**: Number of cycles actually executed
+- **0**: No execution (null pointer or cycles &lt;= 0)
+
+### Description
+
+Executes the eZ80 CPU for the specified number of cycles. This is the main emulation loop driver. The function also updates the framebuffer with current VRAM contents after execution completes.
+
+The TI-84 Plus CE runs at 15 MHz (15,000,000 cycles per second). For real-time emulation at 60 FPS, call this function with `250,000` cycles per frame.
+
+The returned value may differ from the requested cycles if:
+- The CPU is halted or stopped
+- An internal error occurs
+- The emulator needs to synchronize internal state
+
+In normal operation, the returned value should equal the requested cycles.
+
+### Example: Real-Time Emulation Loop
+
+```c
+#include <time.h>
+#include <stdint.h>
+
+#define CPU_FREQ 15000000       // 15 MHz
+#define TARGET_FPS 60           // 60 frames per second
+#define CYCLES_PER_FRAME (CPU_FREQ / TARGET_FPS)  // 250,000
+
+void emulation_loop(SyncEmu* emu) {
+    const uint64_t frame_time_ns = 1000000000 / TARGET_FPS;  // 16.67ms
+    
+    while (running) {
+        struct timespec start;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        
+        // Execute one frame worth of cycles
+        int executed = emu_run_cycles(emu, CYCLES_PER_FRAME);
+        
+        if (executed < CYCLES_PER_FRAME) {
+            printf("Warning: Only executed %d/%d cycles\n",
+                   executed, CYCLES_PER_FRAME);
+        }
+        
+        // Render display
+        int32_t width, height;
+        const uint32_t* fb = emu_framebuffer(emu, &width, &height);
+        render_to_screen(fb, width, height);
+        
+        // Process input events
+        handle_input_events(emu);
+        
+        // Sleep to maintain frame rate
+        struct timespec end;
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        
+        uint64_t elapsed_ns = (end.tv_sec - start.tv_sec) * 1000000000 +
+                              (end.tv_nsec - start.tv_nsec);
+        
+        if (elapsed_ns < frame_time_ns) {
+            struct timespec sleep_time = {
+                .tv_sec = 0,
+                .tv_nsec = frame_time_ns - elapsed_ns
+            };
+            nanosleep(&sleep_time, NULL);
+        }
+    }
+}
+```
+
+### Example: Fast-Forward (Maximum Speed)
+
+```c
+// Run emulator as fast as possible (no frame limiting)
+void fast_forward_loop(SyncEmu* emu, int seconds) {
+    const int cycles_per_second = 15000000;
+    const int total_cycles = cycles_per_second * seconds;
+    const int chunk_size = 1000000;  // 1M cycles per call
+    
+    printf("Fast-forwarding %d seconds...\n", seconds);
+    
+    int cycles_executed = 0;
+    while (cycles_executed < total_cycles) {
+        int to_run = (total_cycles - cycles_executed < chunk_size)
+                     ? (total_cycles - cycles_executed)
+                     : chunk_size;
+        
+        int executed = emu_run_cycles(emu, to_run);
+        cycles_executed += executed;
+        
+        if (executed == 0) {
+            printf("Emulator halted\n");
+            break;
+        }
+        
+        // Update display occasionally
+        if (cycles_executed % (cycles_per_second / 10) == 0) {
+            printf("Progress: %.1f%%\r",
+                   100.0 * cycles_executed / total_cycles);
+            fflush(stdout);
+        }
+    }
+    
+    printf("\nCompleted %d cycles (%.2fs)\n",
+           cycles_executed, cycles_executed / (float)cycles_per_second);
+}
+```
+
+### Example: Step-by-Step Debugging
+
+```c
+// Execute one instruction at a time
+void debug_step(SyncEmu* emu) {
+    // Run a small number of cycles (typical instruction is 1-20 cycles)
+    int executed = emu_run_cycles(emu, 20);
+    
+    printf("Executed %d cycles\n", executed);
+    
+    // Display current state
+    int32_t width, height;
+    const uint32_t* fb = emu_framebuffer(emu, &width, &height);
+    update_debugger_display(fb, width, height);
+}
+```
+
+### Example: Variable Speed Emulation
+
+```c
+// Emulate at different speeds (50%, 100%, 200%)
+void variable_speed_loop(SyncEmu* emu, float speed_multiplier) {
+    const int base_cycles_per_frame = 250000;
+    const int cycles = (int)(base_cycles_per_frame * speed_multiplier);
+    
+    printf("Running at %.0f%% speed\n", speed_multiplier * 100);
+    
+    while (running) {
+        emu_run_cycles(emu, cycles);
+        
+        int32_t width, height;
+        const uint32_t* fb = emu_framebuffer(emu, &width, &height);
+        render_to_screen(fb, width, height);
+        
+        // Always target 60 FPS display, but run more/fewer cycles
+        sleep_ms(16);  // ~60 FPS
+    }
+}
+```
+
+## Timing Details
+
+### Clock Speed
+
+The TI-84 Plus CE eZ80 CPU can run at multiple clock speeds:
+
+- **6 MHz**: Low power mode
+- **12 MHz**: Medium speed
+- **15 MHz**: Default speed (most common)
+- **24 MHz**: High speed
+- **48 MHz**: Maximum speed
+
+The emulator automatically handles clock speed changes. However, for typical use, assume 15 MHz and adjust based on user speed settings if needed.
+
+### Frame Rate
+
+The LCD has no fixed refresh rate, but 60 FPS is standard for emulators:
+
+- **60 FPS** → 15,000,000 / 60 = **250,000 cycles/frame**
+- **30 FPS** → 15,000,000 / 30 = **500,000 cycles/frame**
+- **120 FPS** → 15,000,000 / 120 = **125,000 cycles/frame**
+
+### Instruction Timing
+
+eZ80 instructions take 1-20+ cycles depending on:
+- Instruction type (register ops are fast, memory ops are slow)
+- Memory region (flash has wait states, RAM is faster)
+- ADL mode vs Z80 mode (ADL uses 24-bit addresses)
+
+Typical instruction timings:
+- **NOP**: 1 cycle
+- **LD r,r**: 1 cycle
+- **LD r,(HL)**: 6 cycles
+- **CALL**: 17 cycles
+- **Flash read**: +2 wait state cycles
+
+## Thread Safety
+
+The `emu_run_cycles()` function is thread-safe and can be called concurrently with other API functions like `emu_set_key()` or `emu_framebuffer()`. The internal mutex ensures atomicity.
+
+Typical multi-threaded usage:
+
+```c
+// Emulation thread
+void* emulation_thread(void* arg) {
+    SyncEmu* emu = (SyncEmu*)arg;
+    
+    while (running) {
+        emu_run_cycles(emu, 250000);
+        sleep_ms(16);
+    }
+    
+    return NULL;
+}
+
+// Input thread
+void* input_thread(void* arg) {
+    SyncEmu* emu = (SyncEmu*)arg;
+    
+    while (running) {
+        int key = get_key_press();
+        if (key >= 0) {
+            int row = key / 8;
+            int col = key % 8;
+            emu_set_key(emu, row, col, 1);
+            sleep_ms(50);
+            emu_set_key(emu, row, col, 0);
+        }
+    }
+    
+    return NULL;
+}
+```
+
+## Performance Considerations
+
+### Chunk Size
+
+Running larger chunks per call reduces overhead:
+
+- **Small chunks** (1,000 cycles): High overhead, good for fine-grained control
+- **Medium chunks** (100,000 cycles): Balanced for responsive UI
+- **Large chunks** (1,000,000 cycles): Low overhead, best for maximum speed
+
+For real-time emulation, 250,000 cycles (60 FPS) is optimal.
+
+### Framebuffer Updates
+
+The function automatically calls `emu.render_frame()` after execution, which updates the framebuffer from VRAM. This adds minimal overhead (~0.1ms) but ensures the display is always current.
+
+## Error Handling
+
+The function returns 0 in these cases:
+- Null emulator pointer
+- cycles parameter &lt;= 0
+- Internal CPU halt state
+
+Always check the return value:
+
+```c
+int executed = emu_run_cycles(emu, 250000);
+if (executed == 0) {
+    fprintf(stderr, "Emulation stopped\n");
+    // Check if ROM is loaded, emulator is powered on, etc.
+}
+```
+
+## See Also
+
+- [Display](/api/display) - Read framebuffer after execution
+- [Input](/api/input) - Send key events during execution
+- [Lifecycle](/api/lifecycle) - Power on before execution
+- [ROM Management](/api/rom-management) - Load ROM before execution

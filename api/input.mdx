@@ -1,0 +1,398 @@
+---
+title: Input Handling
+description: Send key press and release events to the emulator
+---
+
+The input API handles keyboard events sent to the emulator.
+
+## emu_set_key
+
+Set the state of a key on the calculator's keypad.
+
+```c
+void emu_set_key(SyncEmu* emu, int32_t row, int32_t col, int32_t down);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+- **row**: Key row (0-7)
+- **col**: Key column (0-7)
+- **down**: Key state (non-zero = pressed, zero = released)
+
+### Description
+
+Sets the state of a key on the TI-84 Plus CE keypad. The keypad is organized as an 8x8 matrix with rows and columns. Each key press/release should be sent as a separate call.
+
+For realistic input simulation, always send both press (down=1) and release (down=0) events with appropriate timing between them.
+
+### Key Matrix Layout
+
+The TI-84 Plus CE keypad is organized as an 8x8 matrix:
+
+```
+         Col 0    Col 1    Col 2    Col 3    Col 4    Col 5    Col 6    Col 7
+Row 0    Graph   Trace    Zoom     Window   Y=       2nd      Mode     Del
+Row 1    STO      Ln       Log      x²       x⁻¹      Math     Alpha    [unused]
+Row 2    0        1        4        7        ,        Sin      Apps     Xt𝜃n
+Row 3    .        2        5        8        (        Cos      Prgm     Stat
+Row 4    (-)      3        6        9        )        Tan      Vars     [unused]
+Row 5    Enter    +        -        *        /        ^        Clear    [unused]
+Row 6    Down     Left     Right    Up       [unused] [unused] [unused] [unused]
+Row 7    [unused] [unused] [unused] [unused] [unused] [unused] [unused] [unused]
+```
+
+### Common Keys
+
+```c
+// Navigation
+#define KEY_UP      6, 3
+#define KEY_DOWN    6, 0
+#define KEY_LEFT    6, 1
+#define KEY_RIGHT   6, 2
+
+// Primary keys
+#define KEY_ENTER   5, 0
+#define KEY_CLEAR   5, 6
+#define KEY_DEL     0, 7
+#define KEY_2ND     0, 5
+#define KEY_ALPHA   1, 6
+#define KEY_MODE    0, 6
+
+// Math operations
+#define KEY_PLUS    5, 1
+#define KEY_MINUS   5, 2
+#define KEY_MUL     5, 3
+#define KEY_DIV     5, 4
+
+// Numbers
+#define KEY_0       2, 0
+#define KEY_1       2, 1
+#define KEY_2       3, 1
+#define KEY_3       4, 1
+#define KEY_4       2, 2
+#define KEY_5       3, 2
+#define KEY_6       4, 2
+#define KEY_7       2, 3
+#define KEY_8       3, 3
+#define KEY_9       4, 3
+
+// Functions
+#define KEY_GRAPH   0, 0
+#define KEY_TRACE   0, 1
+#define KEY_ZOOM    0, 2
+#define KEY_WINDOW  0, 3
+#define KEY_YEQU    0, 4
+#define KEY_MATH    1, 5
+#define KEY_APPS    2, 6
+#define KEY_PRGM    3, 6
+#define KEY_VARS    4, 6
+#define KEY_STAT    3, 7
+```
+
+### Example: Press and Release
+
+```c
+// Press ENTER key
+emu_set_key(emu, 5, 0, 1);
+
+// Wait a bit (simulate human timing)
+sleep_ms(50);
+
+// Release ENTER key
+emu_set_key(emu, 5, 0, 0);
+```
+
+### Example: Type a Number
+
+```c
+void press_key(SyncEmu* emu, int row, int col) {
+    emu_set_key(emu, row, col, 1);
+    sleep_ms(50);  // Hold for 50ms
+    emu_set_key(emu, row, col, 0);
+    sleep_ms(20);  // Wait before next key
+}
+
+void type_number(SyncEmu* emu, const char* num) {
+    const int key_map[10][2] = {
+        {2, 0},  // 0
+        {2, 1},  // 1
+        {3, 1},  // 2
+        {4, 1},  // 3
+        {2, 2},  // 4
+        {3, 2},  // 5
+        {4, 2},  // 6
+        {2, 3},  // 7
+        {3, 3},  // 8
+        {4, 3},  // 9
+    };
+    
+    for (const char* p = num; *p; p++) {
+        if (*p >= '0' && *p <= '9') {
+            int digit = *p - '0';
+            press_key(emu, key_map[digit][0], key_map[digit][1]);
+        }
+    }
+}
+
+// Usage
+type_number(emu, "12345");
+press_key(emu, 5, 0);  // Press ENTER
+```
+
+### Example: SDL2 Keyboard Mapping
+
+```c
+#include <SDL2/SDL.h>
+
+typedef struct {
+    SDL_Scancode sdl_key;
+    int row;
+    int col;
+} KeyMapping;
+
+static const KeyMapping key_mappings[] = {
+    // Arrow keys
+    {SDL_SCANCODE_UP,    6, 3},
+    {SDL_SCANCODE_DOWN,  6, 0},
+    {SDL_SCANCODE_LEFT,  6, 1},
+    {SDL_SCANCODE_RIGHT, 6, 2},
+    
+    // Primary keys
+    {SDL_SCANCODE_RETURN, 5, 0},  // Enter
+    {SDL_SCANCODE_ESCAPE, 5, 6},  // Clear
+    {SDL_SCANCODE_BACKSPACE, 0, 7},  // Del
+    
+    // Numbers
+    {SDL_SCANCODE_0, 2, 0},
+    {SDL_SCANCODE_1, 2, 1},
+    {SDL_SCANCODE_2, 3, 1},
+    {SDL_SCANCODE_3, 4, 1},
+    {SDL_SCANCODE_4, 2, 2},
+    {SDL_SCANCODE_5, 3, 2},
+    {SDL_SCANCODE_6, 4, 2},
+    {SDL_SCANCODE_7, 2, 3},
+    {SDL_SCANCODE_8, 3, 3},
+    {SDL_SCANCODE_9, 4, 3},
+    
+    // Math operations
+    {SDL_SCANCODE_KP_PLUS,  5, 1},
+    {SDL_SCANCODE_KP_MINUS, 5, 2},
+    {SDL_SCANCODE_KP_MULTIPLY, 5, 3},
+    {SDL_SCANCODE_KP_DIVIDE, 5, 4},
+    
+    // End marker
+    {SDL_SCANCODE_UNKNOWN, -1, -1}
+};
+
+void handle_sdl_keyboard(SyncEmu* emu, SDL_Event* event) {
+    if (event->type != SDL_KEYDOWN && event->type != SDL_KEYUP) {
+        return;
+    }
+    
+    SDL_Scancode scancode = event->key.keysym.scancode;
+    int down = (event->type == SDL_KEYDOWN) ? 1 : 0;
+    
+    // Find mapping
+    for (int i = 0; key_mappings[i].sdl_key != SDL_SCANCODE_UNKNOWN; i++) {
+        if (key_mappings[i].sdl_key == scancode) {
+            emu_set_key(emu, key_mappings[i].row,
+                       key_mappings[i].col, down);
+            break;
+        }
+    }
+}
+
+// Usage in event loop
+SDL_Event event;
+while (SDL_PollEvent(&event)) {
+    handle_sdl_keyboard(emu, &event);
+}
+```
+
+### Example: Virtual On-Screen Keypad
+
+```c
+typedef struct {
+    int x, y, width, height;
+    int row, col;
+    const char* label;
+} VirtualKey;
+
+static const VirtualKey virtual_keys[] = {
+    {10, 10, 50, 40, 0, 0, "GRAPH"},
+    {70, 10, 50, 40, 0, 1, "TRACE"},
+    {130, 10, 50, 40, 0, 2, "ZOOM"},
+    // ... more keys ...
+    {10, 200, 50, 40, 5, 0, "ENTER"},
+    {0, 0, 0, 0, -1, -1, NULL}  // End marker
+};
+
+void handle_touch(SyncEmu* emu, int touch_x, int touch_y, int pressed) {
+    for (int i = 0; virtual_keys[i].label != NULL; i++) {
+        const VirtualKey* key = &virtual_keys[i];
+        
+        // Check if touch is within key bounds
+        if (touch_x >= key->x && touch_x < key->x + key->width &&
+            touch_y >= key->y && touch_y < key->y + key->height) {
+            
+            emu_set_key(emu, key->row, key->col, pressed);
+            
+            // Highlight key visually
+            if (pressed) {
+                draw_key_pressed(key);
+            } else {
+                draw_key_released(key);
+            }
+            
+            break;
+        }
+    }
+}
+```
+
+### Example: Multi-Key Combinations
+
+```c
+// Press 2nd + QUIT (MODE) to exit program
+void press_2nd_quit(SyncEmu* emu) {
+    // Press 2nd
+    emu_set_key(emu, 0, 5, 1);
+    sleep_ms(20);
+    
+    // Press MODE while 2nd is held
+    emu_set_key(emu, 0, 6, 1);
+    sleep_ms(50);
+    
+    // Release both
+    emu_set_key(emu, 0, 6, 0);
+    emu_set_key(emu, 0, 5, 0);
+}
+
+// Alpha-Lock: Press ALPHA twice quickly
+void enable_alpha_lock(SyncEmu* emu) {
+    for (int i = 0; i < 2; i++) {
+        emu_set_key(emu, 1, 6, 1);
+        sleep_ms(30);
+        emu_set_key(emu, 1, 6, 0);
+        sleep_ms(50);
+    }
+}
+```
+
+## Thread Safety
+
+The `emu_set_key()` function is thread-safe and can be called from any thread, including UI event handlers while the emulation thread is running.
+
+```c
+// Input handler thread
+void* input_thread(void* arg) {
+    SyncEmu* emu = (SyncEmu*)arg;
+    
+    while (running) {
+        // Wait for key event
+        KeyEvent event = wait_for_key_event();
+        
+        // Send to emulator (thread-safe)
+        emu_set_key(emu, event.row, event.col, event.down);
+    }
+    
+    return NULL;
+}
+
+// Emulation thread continues running
+void* emulation_thread(void* arg) {
+    SyncEmu* emu = (SyncEmu*)arg;
+    
+    while (running) {
+        emu_run_cycles(emu, 250000);
+    }
+    
+    return NULL;
+}
+```
+
+## Timing Considerations
+
+### Key Press Duration
+
+For realistic input:
+- **Minimum press**: 20ms (barely registers)
+- **Typical press**: 50-100ms (normal human input)
+- **Long press**: 500ms+ (triggers key repeat on some keys)
+
+### Key Repeat
+
+The TI-OS implements key repeat for navigation keys. If you hold a key for longer than ~500ms, it will repeat.
+
+### Debouncing
+
+The hardware performs debouncing, so extremely short pulses (&lt;10ms) may be ignored.
+
+## Complete Input Example
+
+```c
+#include <SDL2/SDL.h>
+#include <pthread.h>
+
+typedef struct {
+    SyncEmu* emu;
+    SDL_Window* window;
+    int running;
+} AppContext;
+
+void handle_keyboard_event(AppContext* ctx, SDL_KeyboardEvent* event) {
+    int down = (event->type == SDL_KEYDOWN) ? 1 : 0;
+    
+    // Map SDL keys to calculator keys
+    switch (event->keysym.scancode) {
+        case SDL_SCANCODE_RETURN:
+            emu_set_key(ctx->emu, 5, 0, down);  // ENTER
+            break;
+        case SDL_SCANCODE_ESCAPE:
+            emu_set_key(ctx->emu, 5, 6, down);  // CLEAR
+            break;
+        case SDL_SCANCODE_UP:
+            emu_set_key(ctx->emu, 6, 3, down);
+            break;
+        case SDL_SCANCODE_DOWN:
+            emu_set_key(ctx->emu, 6, 0, down);
+            break;
+        case SDL_SCANCODE_LEFT:
+            emu_set_key(ctx->emu, 6, 1, down);
+            break;
+        case SDL_SCANCODE_RIGHT:
+            emu_set_key(ctx->emu, 6, 2, down);
+            break;
+        case SDL_SCANCODE_0:
+            emu_set_key(ctx->emu, 2, 0, down);
+            break;
+        // ... more keys ...
+    }
+}
+
+void* input_loop(void* arg) {
+    AppContext* ctx = (AppContext*)arg;
+    SDL_Event event;
+    
+    while (ctx->running) {
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                ctx->running = 0;
+            } else if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+                handle_keyboard_event(ctx, &event.key);
+            }
+        }
+        
+        SDL_Delay(1);
+    }
+    
+    return NULL;
+}
+```
+
+## See Also
+
+- [Execution](/api/execution) - Run cycles to process input
+- [Display](/api/display) - See visual feedback from input
+- [C API Overview](/api/c-api-overview) - Thread safety details

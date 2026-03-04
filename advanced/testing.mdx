@@ -1,0 +1,292 @@
+---
+title: Testing
+description: Running unit tests and CEmu parity testing tools
+---
+
+The emulator includes comprehensive testing tools to ensure correctness.
+
+## Rust Unit Tests
+
+Run the test suite from the `core/` directory:
+
+```bash
+cd core
+cargo test
+```
+
+The test suite covers:
+
+- **Memory subsystem** - Flash, RAM, VRAM, memory-mapped ports
+- **Bus address decoding** - Address routing and wait states
+- **eZ80 CPU instructions** - Instruction execution and flag behavior
+- **ADL mode** - 24-bit addressing mode operations
+- **TI-84 CE memory map** - Hardware register layout verification
+
+### Running Specific Tests
+
+Run a specific test by name:
+
+```bash
+cargo test test_name
+```
+
+Run tests matching a pattern:
+
+```bash
+cargo test memory
+```
+
+### Test Output
+
+Show test output (normally hidden):
+
+```bash
+cargo test -- --nocapture
+```
+
+Show test output for specific test:
+
+```bash
+cargo test test_name -- --nocapture
+```
+
+## CEmu Parity Tools
+
+Test tools in `tools/cemu-test/` compare CEmu (reference emulator) behavior with our Rust implementation.
+
+### Prerequisites
+
+1. **Clone CEmu** (one-time setup):
+   ```bash
+   git clone https://github.com/CE-Programming/CEmu.git cemu-ref
+   ```
+
+2. **Build CEmu core**:
+   ```bash
+   cd cemu-ref/core
+   make
+   ```
+
+3. **Obtain a TI-84 Plus CE ROM file** - Place `TI-84 CE.rom` in the project root.
+
+### Building the Tools
+
+```bash
+cd tools/cemu-test
+make
+```
+
+This builds:
+- `parity_check` - State verification at cycle milestones
+- `trace_gen` - CPU instruction trace generator
+
+## parity_check
+
+Verifies RTC timing, MathPrint flag, and key state at cycle milestones.
+
+### Usage
+
+```bash
+cd tools/cemu-test
+
+# Default: 60M cycles, ROM at ../../TI-84 CE.rom
+./parity_check
+
+# Custom ROM and cycle count
+./parity_check /path/to/rom.rom -m 100000000
+
+# Verbose mode
+./parity_check -v
+```
+
+### Monitored Addresses
+
+| Address  | Description                                    |
+|----------|------------------------------------------------|
+| 0xD000C4 | MathPrint flag (bit 5: 1=MathPrint, 0=Classic) |
+| 0xF80020 | RTC control register (bit 6: load in progress) |
+| 0xF80040 | RTC load status (0x00=complete, 0xF8=pending)  |
+
+### Expected Behavior
+
+- RTC load stays pending (0xF8) until ~24M cycles at 48MHz
+- MathPrint flag should be set (0x20) after boot completes
+
+### Output Format
+
+```
+Cycle(M)  | RTC Ctrl | RTC Status | loadTicks | mode | MathPrint | PC
+----------|----------|------------|-----------|------|-----------|--------
+        1 | 0x00     | 0xF8       |         0 |    2 | 0x00 Classic   | 0x000000
+        5 | 0x00     | 0xF8       |         0 |    2 | 0x00 Classic   | 0x00219C
+       10 | 0x00     | 0xF8       |         0 |    2 | 0x00 Classic   | 0x0050E8
+```
+
+## trace_gen
+
+Generates CPU instruction traces for direct comparison with Rust emulator.
+
+### Usage
+
+```bash
+cd tools/cemu-test
+
+# Generate 1M steps to stdout
+./trace_gen ../../TI-84\ CE.rom
+
+# Generate 100k steps to file
+./trace_gen ../../TI-84\ CE.rom -n 100000 -o cemu_trace.txt
+```
+
+### Output Format
+
+Space-separated trace format:
+
+```
+step cycles PC SP AF BC DE HL IX IY ADL IFF1 IFF2 IM HALT opcode
+```
+
+**Example:**
+```
+000000 00000000 000000 000000 0000 000000 000000 000000 000000 000000 0 1 1 Mode2 0 F3
+000001 00000003 000001 000000 0000 000000 000000 000000 000000 000000 0 0 0 Mode2 0 31
+000002 00000006 000004 000000 0000 000000 000000 000000 000000 000000 0 0 0 Mode2 0 ED
+```
+
+**Fields:**
+- `step` - Instruction number
+- `cycles` - Total cycles executed
+- `PC` - Program counter
+- `SP` - Stack pointer
+- `AF` - Accumulator + Flags
+- `BC, DE, HL, IX, IY` - Register pairs
+- `ADL` - ADL mode (0=Z80, 1=eZ80)
+- `IFF1, IFF2` - Interrupt enable flags
+- `IM` - Interrupt mode (Mode0/Mode1/Mode2)
+- `HALT` - Halted state
+- `opcode` - Opcode bytes (hex)
+
+## Comparing Traces
+
+Generate both traces and compare:
+
+```bash
+# 1. Generate CEmu trace
+cd tools/cemu-test
+./trace_gen ../../TI-84\ CE.rom -n 10000 -o cemu_trace.txt
+
+# 2. Generate Rust trace
+cd ../../core
+cargo run --release --example debug -- trace 10000 > rust_trace.txt
+
+# 3. Compare
+diff ../tools/cemu-test/cemu_trace.txt rust_trace.txt | head -50
+
+# Or use the built-in compare command
+cargo run --release --example debug -- compare ../tools/cemu-test/cemu_trace.txt
+```
+
+### Analyzing Divergence
+
+When divergence is found:
+
+1. **Identify the first diverging step** - Note the step number and PC
+2. **Check register differences** - Which registers diverged?
+3. **Check cycle differences** - Does cycle count match?
+4. **Examine the instruction** - What instruction executed at that PC?
+5. **Review instruction implementation** - Check the CPU implementation for that opcode
+
+## Full Trace Comparison
+
+For detailed I/O-level debugging, use `fulltrace` and `fullcompare`:
+
+```bash
+# Generate our trace (JSON with I/O ops)
+cd core
+cargo run --release --example debug -- fulltrace 1000
+
+# Generate CEmu trace (requires patched CEmu in cemu-ref/)
+cd ../cemu-ref
+./test/fulltrace "../TI-84 CE.rom" 1000 /tmp/cemu_trace.json
+
+# Compare traces and report divergences
+cd ../core
+cargo run --release --example debug -- fullcompare ../traces/fulltrace_*.json /tmp/cemu_trace.json
+```
+
+The comparison shows:
+- PC/opcode mismatches
+- Cycle differences
+- Register state divergences
+- I/O operation differences
+
+## Testing Workflow
+
+Recommended testing workflow:
+
+### 1. Run Unit Tests First
+
+```bash
+cd core
+cargo test
+```
+
+Fix any failing tests before proceeding.
+
+### 2. Verify Boot
+
+```bash
+cargo run --release --example debug -- boot
+```
+
+Ensure the emulator boots to the idle loop.
+
+### 3. Generate Parity Trace
+
+```bash
+cargo run --release --example debug -- trace 100000
+```
+
+### 4. Compare with CEmu
+
+Generate CEmu trace and compare:
+
+```bash
+cd ../tools/cemu-test
+./trace_gen ../../TI-84\ CE.rom -n 100000 -o cemu_trace.txt
+cd ../../core
+cargo run --release --example debug -- compare ../tools/cemu-test/cemu_trace.txt
+```
+
+### 5. Investigate Divergence Immediately
+
+If divergence is found, investigate before continuing other work.
+
+## Continuous Integration
+
+For CI/CD pipelines:
+
+```bash
+# Run unit tests
+cd core
+cargo test
+
+# Verify boot (requires ROM file)
+if [ -f "TI-84 CE.rom" ]; then
+  cargo run --release --example debug -- boot
+fi
+```
+
+## Test Coverage
+
+Current test status (from milestones):
+
+- **277/455 tests passing** (178 pre-existing failures)
+- **Boot test passing** - 168.14M cycles to idle loop at PC=085B80
+- **All 7 CEmu parity phases complete**
+
+## See Also
+
+- [Debugging Tools](/advanced/debugging) - Debug commands and trace generation
+- [CEmu Parity](/advanced/cemu-parity) - CEmu setup and parity verification
+- [ROM Loading](/advanced/rom-loading) - Loading programs for testing

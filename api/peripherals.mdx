@@ -1,0 +1,522 @@
+---
+title: Peripherals
+description: Hardware peripheral controllers (LCD, keypad, timers, interrupts, etc.)
+---
+
+The `peripherals` module contains all memory-mapped peripheral controllers for the TI-84 Plus CE. Peripherals are accessed via memory-mapped I/O in the address range 0xE00000 - 0xFFFFFF.
+
+## Peripheral Subsystem
+
+The `Peripherals` struct aggregates all hardware controllers:
+
+```rust
+pub struct Peripherals {
+    pub control: ControlPorts,       // Power, CPU speed, device config
+    pub flash: FlashController,      // Flash memory control
+    pub interrupt: InterruptController, // Interrupt routing
+    pub timers: GeneralTimers,       // 3 × 32-bit timers
+    pub lcd: LcdController,          // Display controller
+    pub keypad: KeypadController,    // 8×8 key matrix scanner
+    pub watchdog: WatchdogController,// Watchdog timer
+    pub rtc: RtcController,          // Real-time clock
+    pub sha256: Sha256Controller,    // SHA256 accelerator
+    pub backlight: Backlight,        // LCD backlight PWM
+    // ... internal state
+}
+```
+
+## Memory Map
+
+| Address Range       | Peripheral            | Description                        |
+|---------------------|-----------------------|------------------------------------|
+| 0xE00000 - 0xE000FF | Control Ports         | Power, CPU speed, device config    |
+| 0xE10000 - 0xE100FF | Flash Controller      | Flash memory control, wait states  |
+| 0xE20000 - 0xE200FF | SHA256 Accelerator    | Hardware SHA256 hashing            |
+| 0xE30000 - 0xE30FFF | LCD Controller        | Display timing, DMA, palette       |
+| 0xF00000 - 0xF0001F | Interrupt Controller  | Hardware interrupt routing         |
+| 0xF20000 - 0xF2003F | General Timers        | Three 32-bit timers                |
+| 0xF50000 - 0xF50FFF | Keypad Controller     | 8×8 key matrix scanner             |
+| 0xF60000 - 0xF600FF | Watchdog Timer        | System watchdog                    |
+| 0xF80000 - 0xF800FF | RTC Controller        | Real-time clock                    |
+| 0xFB0000 - 0xFB00FF | Backlight Controller  | LCD backlight PWM                  |
+| 0xFF0000 - 0xFF00FF | Control Ports (alt)   | Alternate address (via OUT0/IN0)   |
+
+## Creating Peripherals
+
+```rust
+use ti84ce_core::peripherals::Peripherals;
+
+let mut peripherals = Peripherals::new();
+```
+
+## Reading/Writing Registers
+
+Peripherals are accessed via byte-level reads/writes:
+
+```rust
+let key_state = [[false; 8]; 8]; // 8×8 key matrix
+
+// Read from LCD control register (offset from 0xE00000)
+let value = peripherals.read(0x030018, &key_state, 0);
+
+// Write to LCD control register
+peripherals.write(0x030018, 0x01, 0); // Enable LCD
+```
+
+<Note>
+Addresses are **offsets from 0xE00000**. For example, LCD controller at 0xE30000 uses offset 0x030000.
+</Note>
+
+## Control Ports
+
+**Address**: 0xE00000 (offset 0x000000) and 0xFF0000 (alternate, offset 0x1F0000)
+
+Control ports manage system-wide settings:
+
+### Key Registers
+
+| Offset | Name         | Description                           |
+|--------|--------------|---------------------------------------|
+| 0x00   | POWER        | Power control, battery status         |
+| 0x01   | CPU_SPEED    | CPU speed: 0=6MHz, 1=12MHz, 2=24MHz, 3=48MHz |
+| 0x03   | DEVICE_TYPE  | Device type and serial flash flag     |
+| 0x05   | CONTROL      | Control flags                         |
+| 0x0D   | LCD_ENABLE   | LCD master enable                     |
+| 0x28   | FLASH_UNLOCK | Flash unlock status                   |
+
+### CPU Speed Control
+
+```rust
+// Read current CPU speed
+let speed = peripherals.control.cpu_speed(); // 0-3
+
+// Set CPU speed to 48 MHz
+peripherals.control.write(0x01, 0x03);
+```
+
+### Power Control
+
+```rust
+// Check if device is off
+if peripherals.control.is_off() {
+    println!("Device powered off");
+}
+
+// Power off (sets bit 6 of port 0x00)
+peripherals.control.write(0x00, 0x40);
+```
+
+## Flash Controller
+
+**Address**: 0xE10000 (offset 0x010000)
+
+Controls flash memory timing and mapping:
+
+| Offset | Name         | Description                    |
+|--------|--------------|--------------------------------|
+| 0x00   | ENABLE       | Flash enable (1=enabled)       |
+| 0x01   | SIZE_CONFIG  | Flash size configuration       |
+| 0x02   | MAP_SELECT   | Flash map selection            |
+| 0x05   | WAIT_STATES  | Additional wait states (0-255) |
+
+### Wait States
+
+Flash access timing = 6 base cycles + wait_states:
+
+```rust
+let wait_states = peripherals.flash.wait_states();
+let total_cycles = peripherals.flash.total_wait_cycles(); // 6 + wait_states
+```
+
+## Interrupt Controller
+
+**Address**: 0xF00000 (offset 0x100000)
+
+Routes hardware interrupts to the CPU:
+
+```rust
+use ti84ce_core::peripherals::interrupt::sources;
+
+// Raise timer interrupt
+peripherals.interrupt.raise(sources::TIMER1);
+
+// Check if any interrupt is pending
+if peripherals.interrupt.irq_pending() {
+    // Handle interrupt
+}
+
+// Enable keypad interrupt
+peripherals.interrupt.write(0x04, sources::KEYPAD as u8);
+
+// Clear interrupt
+peripherals.interrupt.clear_raw(sources::TIMER1);
+```
+
+### Interrupt Sources
+
+```rust
+pub mod sources {
+    pub const TIMER1: u32  = 0x0001; // Timer 1
+    pub const TIMER2: u32  = 0x0002; // Timer 2
+    pub const TIMER3: u32  = 0x0004; // Timer 3
+    pub const OSTIMER: u32 = 0x0010; // OS Timer (32KHz)
+    pub const LCD: u32     = 0x0020; // LCD controller
+    pub const KEYPAD: u32  = 0x0400; // Keypad controller
+    // ... more sources
+}
+```
+
+## General Timers
+
+**Address**: 0xF20000 (offset 0x120000)
+
+Three 32-bit timers with match/overflow detection:
+
+### Control Register (0x30-0x33)
+
+Packed 32-bit register:
+
+- Bits 0, 3, 6: Timer 0/1/2 enable
+- Bits 1, 4, 7: Timer 0/1/2 clock source (0=CPU, 1=32KHz)
+- Bits 2, 5, 8: Timer 0/1/2 overflow enable
+- Bits 9, 10, 11: Timer 0/1/2 count direction (0=down, 1=up)
+
+### Usage Example
+
+```rust
+// Enable timer 0 with overflow interrupt, count up
+let ctrl = 0x01 | 0x04 | (1 << 9); // Enable + overflow + count up
+peripherals.timers.write(0x30, (ctrl & 0xFF) as u8);
+peripherals.timers.write(0x31, ((ctrl >> 8) & 0xFF) as u8);
+
+// Set mask for overflow bit
+peripherals.timers.write(0x38, 0x04); // Bit 2 = timer 0 overflow
+
+// Set counter to max
+peripherals.timers.write(0x00, 0xFF);
+peripherals.timers.write(0x01, 0xFF);
+peripherals.timers.write(0x02, 0xFF);
+peripherals.timers.write(0x03, 0xFF);
+
+// Tick timer
+peripherals.tick(100, 0); // Advance 100 cycles
+
+// Check if overflow occurred
+if peripherals.timers.interrupt_state() & (1 << 0) != 0 {
+    println!("Timer 0 overflow");
+}
+```
+
+### Timer Delay Pipeline
+
+Timer interrupts are deferred by 2 cycles through a delay pipeline:
+
+```rust
+if peripherals.timers.needs_delay_event {
+    // Schedule TimerDelay event in scheduler
+    scheduler.set(EventId::TimerDelay, 2);
+}
+
+// Later, when event fires:
+let (status, intrpt, has_more) = peripherals.timers.process_delay();
+for i in 0..3 {
+    if intrpt & (1 << i) != 0 {
+        let source = match i {
+            0 => sources::TIMER1,
+            1 => sources::TIMER2,
+            2 => sources::TIMER3,
+            _ => unreachable!(),
+        };
+        peripherals.interrupt.raise(source);
+    }
+}
+```
+
+## LCD Controller
+
+**Address**: 0xE30000 (offset 0x030000)
+
+Manages the 320×240 RGB display:
+
+### Key Registers
+
+| Offset      | Name    | Description                         |
+|-------------|---------|-------------------------------------|
+| 0x000-0x00F | TIMING  | Timing parameters (4 × 32-bit)     |
+| 0x010-0x013 | UPBASE  | Upper panel base address (VRAM)    |
+| 0x018-0x01B | CONTROL | Control register                   |
+| 0x01C       | IMSC    | Interrupt mask                     |
+| 0x020       | RIS     | Raw interrupt status               |
+| 0x02C-0x02F | UPCURR  | Current DMA address (read-only)    |
+| 0x200-0x3FF | PALETTE | 256 color palette entries (2 bytes)|
+
+### Control Bits
+
+- Bit 0: LCD enable
+- Bits 1-3: Bits per pixel (1/2/4/8/16 bpp)
+- Bit 8: BGR swap
+- Bit 11: LCD power
+
+### Usage Example
+
+```rust
+// Set VRAM base address
+peripherals.lcd.set_upbase(0xD40000);
+
+// Enable LCD (16bpp RGB565)
+let ctrl = 0x0001   // Enable
+         | (0x05 << 1) // 16 bpp
+         | (1 << 11);  // Power
+peripherals.lcd.set_control(ctrl);
+
+// Read current DMA address
+let current = peripherals.lcd.upcurr();
+println!("DMA at 0x{:06X}", current);
+
+// Set palette entry 0 to white (BGR1555)
+peripherals.lcd.write(0x200, 0xFF); // Low byte
+peripherals.lcd.write(0x201, 0x7F); // High byte (0x7FFF)
+```
+
+### LCD DMA State Machine
+
+The LCD controller uses a state machine for display refresh:
+
+```rust
+pub enum LcdCompare {
+    FrontPorch,  // Front porch period
+    Sync,        // Sync pulse
+    Lnbu,        // Line buffer underrun
+    BackPorch,   // Back porch period
+    ActiveVideo, // Active video DMA
+}
+```
+
+The state machine is driven by scheduler events (see [Scheduler](/api/scheduler)).
+
+## Keypad Controller
+
+**Address**: 0xF50000 (offset 0x150000)
+
+Scans the 8×8 key matrix:
+
+### Registers
+
+| Offset      | Name       | Description                          |
+|-------------|------------|--------------------------------------|
+| 0x00-0x03   | CONTROL    | Mode, row wait, scan wait (packed)   |
+| 0x04-0x07   | SIZE       | Rows, cols, mask (packed)            |
+| 0x08-0x0B   | INT_STATUS | Interrupt status (write-1-to-clear)  |
+| 0x0C-0x0F   | INT_ENABLE | Interrupt enable                     |
+| 0x10-0x2F   | DATA[0..15]| Row data (16 rows × 2 bytes)         |
+| 0x40-0x43   | GPIO_ENABLE| GPIO enable                          |
+
+### Scan Modes
+
+```rust
+pub mod mode {
+    pub const IDLE: u8 = 0;        // Idle (no scanning)
+    pub const SINGLE: u8 = 1;      // Single scan
+    pub const CONTINUOUS: u8 = 2;  // Continuous (single then idle)
+    pub const MULTI_GROUP: u8 = 3; // Repeating scan
+}
+```
+
+### Usage Example
+
+```rust
+// Set mode to continuous scan
+peripherals.keypad.write(0x00, 0x02);
+
+// Enable any-key interrupt
+peripherals.keypad.write(0x0C, 0x04); // Bit 2 = any key
+
+// Press key (row 0, col 3)
+peripherals.set_key(0, 3, true);
+
+// Trigger any_key_check
+peripherals.keypad.write(0x08, 0xFF); // Write to status
+
+// Read data register for row 0
+let data = peripherals.keypad.read(0x10, &key_state);
+assert_eq!(data, 1 << 3); // Bit 3 set (active-high)
+```
+
+### Key Edge Detection
+
+The keypad controller tracks key edges for reliable detection:
+
+```rust
+// Set key edge flag on press
+peripherals.keypad.set_key_edge(0, 3, true);
+
+// any_key_check clears edge flags after reading
+let should_interrupt = peripherals.keypad.any_key_check(&key_state);
+```
+
+## Backlight Controller
+
+**Address**: 0xFB0000 (offset 0x1B0000)
+
+Controls LCD backlight brightness via PWM:
+
+```rust
+// Read backlight level (0-255)
+let level = peripherals.backlight.level();
+
+// Set backlight to 50%
+peripherals.backlight.write(0x00, 128);
+```
+
+## RTC Controller
+
+**Address**: 0xF80000 (offset 0x180000)
+
+Provides real-time clock functionality:
+
+```rust
+// Read RTC seconds
+let seconds = peripherals.rtc.seconds();
+
+// Set RTC time
+peripherals.rtc.set_time(12, 34, 56); // 12:34:56
+```
+
+The RTC generates a 1-second tick event (see [Scheduler](/api/scheduler)).
+
+## Watchdog Controller
+
+**Address**: 0xF60000 (offset 0x160000)
+
+System watchdog timer:
+
+```rust
+// Enable watchdog
+peripherals.watchdog.write(0x00, 0x01);
+
+// Pet watchdog (reset timer)
+peripherals.watchdog.write(0x04, 0xAA);
+```
+
+## Ticking Peripherals
+
+Peripherals are updated via the `tick()` method:
+
+```rust
+let cycles = 1000u32;
+let delay_remaining = 0u64; // Timer delay pipeline cycles
+
+// Tick all peripherals
+let irq_pending = peripherals.tick(cycles, delay_remaining);
+
+if irq_pending {
+    // Raise CPU IRQ
+    cpu.irq_pending = true;
+}
+```
+
+The `tick()` method:
+- Advances timers by CPU cycles
+- Updates keypad scan state
+- Generates OS Timer interrupts (32KHz crystal)
+- Syncs interrupt controller state
+
+## State Persistence
+
+Peripheral state can be saved/restored:
+
+```rust
+// Save state (2304 bytes)
+let snapshot = peripherals.to_bytes();
+std::fs::write("peripherals.state", &snapshot)?;
+
+// Load state
+let data = std::fs::read("peripherals.state")?;
+peripherals.from_bytes(&data)?;
+```
+
+## Usage Example
+
+Complete example showing peripheral usage:
+
+```rust
+use ti84ce_core::peripherals::{Peripherals, interrupt::sources};
+
+let mut peripherals = Peripherals::new();
+let key_state = [[false; 8]; 8];
+
+// Set CPU speed to 48 MHz
+peripherals.control.write(0x01, 0x03);
+
+// Enable timer 0 interrupt
+peripherals.interrupt.write(0x04, sources::TIMER1 as u8);
+
+// Configure timer 0
+let ctrl = 0x01 | 0x04 | (1 << 9); // Enable + overflow + count up
+peripherals.timers.write(0x30, (ctrl & 0xFF) as u8);
+peripherals.timers.write(0x31, ((ctrl >> 8) & 0xFF) as u8);
+peripherals.timers.write(0x38, 0x04); // Overflow mask
+
+// Set counter to max
+for i in 0..4 {
+    peripherals.timers.write(i, 0xFF);
+}
+
+// Enable LCD
+peripherals.lcd.set_upbase(0xD40000);
+peripherals.lcd.set_control(0x0801); // Enable + 16bpp
+
+// Tick peripherals
+let irq = peripherals.tick(1000, 0);
+println!("IRQ pending: {}", irq);
+```
+
+## Public Methods
+
+### Core Methods
+
+```rust
+impl Peripherals {
+    pub fn new() -> Self;
+    pub fn reset(&mut self);
+    pub fn read(&mut self, addr: u32, key_state: &[[bool; 8]; 8], cycles: u64) -> u8;
+    pub fn write(&mut self, addr: u32, value: u8, cycles: u64);
+    pub fn tick(&mut self, cycles: u32, delay_remaining: u64) -> bool;
+}
+```
+
+### Key Input
+
+```rust
+impl Peripherals {
+    pub fn set_key(&mut self, row: usize, col: usize, pressed: bool);
+    pub fn key_state(&self) -> &[[bool; 8]; 8];
+}
+```
+
+### State Persistence
+
+```rust
+impl Peripherals {
+    const SNAPSHOT_SIZE: usize; // 2304 bytes
+    pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE];
+    pub fn from_bytes(&mut self, buf: &[u8]) -> Result<(), i32>;
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Scheduler" icon="clock" href="/api/scheduler">
+    Learn how peripheral events are scheduled
+  </Card>
+  <Card title="CPU Module" icon="cpu" href="/api/cpu-module">
+    Understand interrupt handling
+  </Card>
+  <Card title="Memory Types" icon="memory" href="/api/memory">
+    Explore memory-mapped I/O architecture
+  </Card>
+  <Card title="Testing" icon="vial" href="/development/testing">
+    Test peripheral functionality
+  </Card>
+</CardGroup>

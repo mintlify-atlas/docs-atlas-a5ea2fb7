@@ -1,0 +1,330 @@
+---
+title: CEmu Parity
+description: CEmu setup, trace generation, and parity verification workflow
+---
+
+CEmu is the established open-source TI-84 Plus CE emulator used as a reference implementation for parity testing.
+
+## Overview
+
+CEmu serves three purposes:
+
+1. **Parity testing** - Compare our emulation against known-correct behavior
+2. **Debugging** - When something doesn't work, check if CEmu behaves the same
+3. **Development** - Test app features before Rust implementation is complete
+
+## CEmu Setup
+
+### Clone CEmu Repository
+
+One-time setup (git-ignored, not committed):
+
+```bash
+# From project root
+git clone https://github.com/CE-Programming/CEmu.git cemu-ref
+```
+
+The `cemu-ref/` directory is added to `.gitignore` and not tracked.
+
+### Build CEmu Core
+
+```bash
+cd cemu-ref/core
+make
+```
+
+This builds the CEmu core library (`libcemucore.a`) used by the test tools.
+
+### Obtain ROM File
+
+You need a TI-84 Plus CE ROM file:
+
+1. **Extract from a real calculator** - Use TI-Connect CE or tilp
+2. **Place in project root** - Name it `TI-84 CE.rom`
+
+The ROM is required for both CEmu and Rust emulator testing.
+
+## CEmu Core Directory Structure
+
+Understanding CEmu's structure helps when debugging:
+
+### Hardware Emulation
+
+| File           | Description                                   |
+|----------------|-----------------------------------------------|
+| asic.c/h       | Main ASIC orchestrator, port_map array        |
+| cpu.c/h        | eZ80 CPU implementation                       |
+| control.c/h    | Control ports (0xFF00xx via OUT0/IN0)         |
+| flash.c/h      | Flash memory controller and status registers  |
+| lcd.c/h        | LCD controller at 0xE30000                    |
+| timers.c/h     | General purpose timers at 0xF20000            |
+| keypad.c/h     | Keypad controller at 0xF50000                 |
+| interrupt.c/h  | Interrupt controller at 0xF00000              |
+| backlight.c/h  | LCD backlight control                         |
+| spi.c/h        | SPI bus for hardware communication            |
+| uart.c/h       | Serial port emulation                         |
+
+### Memory
+
+| File     | Description                  |
+|----------|------------------------------|
+| mem.c/h  | Memory bus routing (flash/RAM/ports) |
+| bus.c/h  | Bus operations               |
+
+### Debug
+
+| Directory | Description                     |
+|-----------|---------------------------------|
+| debug/    | Debugger and disassembler utilities |
+
+## TI-84 CE Memory Map
+
+Memory layout (referenced from CEmu):
+
+| Address Range     | Device               | CEmu File   |
+|-------------------|----------------------|-------------|
+| 0x000000-0x3FFFFF | Flash (4MB)          | flash.c     |
+| 0xD00000-0xD657FF | RAM (256KB+VRAM)     | mem.c       |
+| 0xE00000-0xE0FFFF | Control ports        | control.c   |
+| 0xE10000-0xE1FFFF | Flash controller     | flash.c     |
+| 0xE30000-0xE300FF | LCD controller       | lcd.c       |
+| 0xF00000-0xF0001F | Interrupt controller | interrupt.c |
+| 0xF20000-0xF2003F | Timers (3x GPT)      | timers.c    |
+| 0xF50000-0xF5003F | Keypad               | keypad.c    |
+| 0xFF0000-0xFF00FF | Control ports (OUT0) | control.c   |
+
+## Control Ports (0xFF00xx / 0xE000xx)
+
+Accessed via OUT0/IN0 instructions or direct memory access:
+
+| Port | Function                   |
+|------|----------------------------|
+| 0x00 | Power control, battery     |
+| 0x01 | CPU speed (6/12/24/48 MHz) |
+| 0x02 | Battery status readout     |
+| 0x03 | Device type, serial flash  |
+| 0x05 | Control flags              |
+| 0x06 | Protected ports unlock     |
+| 0x08 | Fixed value (0x7F)         |
+| 0x0D | LCD enable/disable         |
+| 0x0F | USB status                 |
+| 0x1C | Fixed value (0x80)         |
+| 0x28 | Flash unlock status        |
+
+## Flash Controller Ports (0xE10000)
+
+| Offset | Function            |
+|--------|---------------------|
+| 0x00   | Flash enable        |
+| 0x01   | Flash size config   |
+| 0x02   | Flash map selection |
+| 0x05   | Wait states         |
+
+## Trace Generation
+
+CEmu trace tools are in `tools/cemu-test/`:
+
+### trace_gen
+
+Generates CPU instruction traces:
+
+```bash
+cd tools/cemu-test
+./trace_gen ../../TI-84\ CE.rom -n 100000 -o cemu_trace.txt
+```
+
+**Output format:**
+```
+step cycles PC SP AF BC DE HL IX IY ADL IFF1 IFF2 IM HALT opcode
+```
+
+### parity_check
+
+Verifies state at cycle milestones:
+
+```bash
+cd tools/cemu-test
+./parity_check                           # Defaults: 60M cycles
+./parity_check /path/to/rom.rom -m 100000000  # Custom ROM and cycles
+./parity_check -v                        # Verbose mode
+```
+
+**Monitored addresses:**
+- `0xD000C4` - MathPrint flag (bit 5: 1=MathPrint, 0=Classic)
+- `0xF80020` - RTC control register (bit 6: load in progress)
+- `0xF80040` - RTC load status (0x00=complete, 0xF8=all pending)
+
+## Parity Verification Workflow
+
+### 1. Generate CEmu Trace
+
+```bash
+cd tools/cemu-test
+./trace_gen ../../TI-84\ CE.rom -n 10000 -o cemu_trace.txt
+```
+
+### 2. Generate Rust Trace
+
+```bash
+cd ../../core
+cargo run --release --example debug -- trace 10000 > rust_trace.txt
+```
+
+### 3. Compare Traces
+
+```bash
+# Manual diff
+diff ../tools/cemu-test/cemu_trace.txt rust_trace.txt | head -50
+
+# Or use built-in compare
+cargo run --release --example debug -- compare ../tools/cemu-test/cemu_trace.txt
+```
+
+### 4. Analyze Divergence
+
+When divergence is found:
+
+1. **Note the step number** - Where did it diverge?
+2. **Check PC and opcode** - What instruction executed?
+3. **Compare registers** - Which registers differ?
+4. **Check cycles** - Does cycle count match?
+5. **Review implementation** - Check CPU/bus/peripheral code
+
+## Trace Comparison Strategy
+
+Key areas to verify:
+
+### 1. Register Parity
+
+All registers must match at every PC:
+- AF, BC, DE, HL, IX, IY, SP
+- ADL mode flag
+- IFF1, IFF2 interrupt flags
+- Interrupt mode (IM)
+
+### 2. Cycle Parity
+
+Total cycles must match CEmu at each instruction. Compare:
+- Per-instruction cycle costs
+- Memory access wait states
+- Interrupt processing overhead
+
+### 3. Memory Timing
+
+- **Flash wait states** - 3-6 cycles per access
+- **RAM cycles** - 1-2 cycles per access
+- **Port write delays** - Some ports have multi-cycle delays
+
+### 4. Run Longer Traces
+
+Many bugs only appear after 100K+ steps:
+
+```bash
+# Generate 1M step traces
+cd tools/cemu-test
+./trace_gen ../../TI-84\ CE.rom -n 1000000 -o cemu_1M.txt
+
+cd ../../core
+cargo run --release --example debug -- trace 1000000 > rust_1M.txt
+
+diff ../tools/cemu-test/cemu_1M.txt rust_1M.txt | head -50
+```
+
+## Full Trace Comparison (JSON)
+
+For I/O-level debugging:
+
+### Generate Traces
+
+```bash
+# Our trace (JSON with I/O ops)
+cd core
+cargo run --release --example debug -- fulltrace 1000
+
+# CEmu trace (requires patched CEmu in cemu-ref/)
+cd ../cemu-ref
+./test/fulltrace "../TI-84 CE.rom" 1000 /tmp/cemu_trace.json
+```
+
+### Compare
+
+```bash
+cd ../core
+cargo run --release --example debug -- fullcompare ../traces/fulltrace_*.json /tmp/cemu_trace.json
+```
+
+Reports:
+- PC/opcode mismatches
+- Cycle differences
+- Register state divergences
+- I/O operation differences
+
+### JSON Trace Format
+
+```json
+{
+  "step": 0,
+  "cycle": 0,
+  "pc": "0x000000",
+  "opcode": {"bytes": "F3", "mnemonic": "DI"},
+  "regs_before": {"A": "0x00", "F": "0x00", "BC": "0x000000", ...},
+  "io_ops": [
+    {"type": "write", "target": "ram", "addr": "0xD00000", "new": "0xFF"}
+  ],
+  "cycles": 3
+}
+```
+
+## CEmu Parity Milestones
+
+The project tracks parity progress across 7 phases (see `docs/milestones.md`):
+
+| Phase | Focus                    | Status   |
+|-------|--------------------------|----------|
+| 1     | CPU Instructions         | Complete |
+| 2     | Bus/Address Decoding     | Complete |
+| 3     | Peripheral Registers     | Complete |
+| 4     | Scheduler & Timing       | Complete |
+| 5     | RTC/SHA256/Control       | Complete |
+| 6     | LCD & SPI                | Complete |
+| 7     | CPU Advanced & Bus       | Complete |
+
+**Current status:**
+- Boot passes at PC=085B80 with 168.14M cycles
+- 277/455 tests passing (178 pre-existing failures)
+- All 7 phases complete
+
+## Building with CEmu Backend
+
+The apps can be built with CEmu instead of Rust core:
+
+```bash
+# Android
+./scripts/build.sh android --cemu
+
+# iOS (then open Xcode to build app)
+./scripts/build.sh ios --sim --cemu
+
+# Web
+make web-cemu
+```
+
+Useful for:
+- Testing app features before Rust implementation is complete
+- Verifying UI behavior
+- Performance comparison
+
+## Critical Instructions for Boot
+
+These eZ80 instructions were essential for boot success:
+
+- **LD A,MB** (ED 6E) - Load MBASE into A, used for RAM address validation
+- **MLT** (ED 4C/5C/6C/7C) - Multiply high/low bytes of register pair
+- **LEA** (ED 22/23) - Load effective address into register pair
+- **Indexed loads** (DD/FD 31/3E) - Special eZ80 indexed memory operations
+
+## See Also
+
+- [Debugging Tools](/advanced/debugging) - Trace generation and comparison
+- [Testing](/advanced/testing) - Running parity tests
+- [CEmu Repository](https://github.com/CE-Programming/CEmu) - Reference emulator source

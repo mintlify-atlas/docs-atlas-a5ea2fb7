@@ -1,0 +1,238 @@
+---
+title: ROM Management
+description: Load ROM images and send files to the emulator
+---
+
+ROM management functions handle loading the calculator's operating system and transferring files to the calculator's flash archive.
+
+## emu_load_rom
+
+Load ROM data into the emulator.
+
+```c
+int emu_load_rom(SyncEmu* emu, const uint8_t* data, size_t len);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+- **data**: Pointer to ROM data buffer
+- **len**: Size of ROM data in bytes
+
+### Returns
+
+- **0**: Success
+- **-1**: Invalid parameter (null pointer)
+- **Negative error code**: Load failure
+
+### Description
+
+Loads a TI-84 Plus CE ROM image into the emulator's flash memory. The ROM contains the calculator's operating system and must be loaded before calling `emu_power_on()` or `emu_run_cycles()`.
+
+The ROM data is copied into the emulator's internal buffers, so the caller can free the ROM buffer after this function returns successfully.
+
+### Example
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+// Load ROM from file
+uint8_t* load_rom_file(const char* path, size_t* out_size) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    
+    fseek(f, 0, SEEK_END);
+    *out_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    uint8_t* data = malloc(*out_size);
+    fread(data, 1, *out_size, f);
+    fclose(f);
+    
+    return data;
+}
+
+int main(void) {
+    SyncEmu* emu = emu_create();
+    
+    // Load ROM
+    size_t rom_size;
+    uint8_t* rom = load_rom_file("TI-84-CE.rom", &rom_size);
+    if (!rom) {
+        fprintf(stderr, "Failed to read ROM file\n");
+        emu_destroy(emu);
+        return 1;
+    }
+    
+    printf("Loading ROM (%zu bytes)...\n", rom_size);
+    int result = emu_load_rom(emu, rom, rom_size);
+    free(rom);  // Can free after loading
+    
+    if (result != 0) {
+        fprintf(stderr, "Failed to load ROM: %d\n", result);
+        emu_destroy(emu);
+        return 1;
+    }
+    
+    printf("ROM loaded successfully\n");
+    emu_destroy(emu);
+    return 0;
+}
+```
+
+### Notes
+
+- ROM size is typically 4MB for TI-84 Plus CE
+- ROM must be loaded before power-on
+- Can be called multiple times to reload different ROMs
+- The ROM data is copied - caller owns the input buffer
+- Reset preserves the loaded ROM
+
+---
+
+## emu_send_file
+
+Send a .8xp or .8xv file to the calculator's flash archive.
+
+```c
+int emu_send_file(SyncEmu* emu, const uint8_t* data, size_t len);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+- **data**: Pointer to file data buffer (complete .8xp/.8xv file)
+- **len**: Size of file data in bytes
+
+### Returns
+
+- **>= 0**: Number of entries successfully injected into flash archive
+- **-1**: Invalid parameter (null pointer or zero length)
+- **-10**: ROM not loaded (must call `emu_load_rom()` first)
+- **-11**: Parse error (invalid file format)
+- **-12**: No flash space available
+- **-13**: Already booted (must be called before `emu_power_on()`)
+
+### Description
+
+Injects a TI-83+ file format (.8xp program, .8xv variable, etc.) directly into the calculator's flash archive. This allows pre-loading programs and data before the calculator boots.
+
+**Important**: Must be called after `emu_load_rom()` but before `emu_power_on()`. The calculator must be in a pre-boot state for flash modification to work correctly.
+
+The file is parsed and each variable entry is written to flash memory. When the calculator boots, TI-OS will discover these files during its normal flash scan.
+
+### Example
+
+```c
+// Send program file to calculator
+uint8_t* program = load_file("GAME.8xp", &program_size);
+
+int entries = emu_send_file(emu, program, program_size);
+if (entries < 0) {
+    fprintf(stderr, "Failed to send file: error %d\n", entries);
+    switch (entries) {
+        case -10:
+            fprintf(stderr, "ROM not loaded\n");
+            break;
+        case -11:
+            fprintf(stderr, "Invalid file format\n");
+            break;
+        case -12:
+            fprintf(stderr, "Flash is full\n");
+            break;
+        case -13:
+            fprintf(stderr, "Calculator already booted\n");
+            break;
+    }
+} else {
+    printf("Successfully injected %d entries\n", entries);
+}
+
+free(program);
+```
+
+### Complete Workflow Example
+
+```c
+SyncEmu* emu = emu_create();
+
+// 1. Load ROM
+if (emu_load_rom(emu, rom, rom_size) != 0) {
+    fprintf(stderr, "ROM load failed\n");
+    return;
+}
+
+// 2. Send files BEFORE power-on
+int result = emu_send_file(emu, program1, size1);
+if (result < 0) {
+    fprintf(stderr, "Failed to send program1: %d\n", result);
+    return;
+}
+printf("Sent program1: %d entries\n", result);
+
+result = emu_send_file(emu, program2, size2);
+if (result < 0) {
+    fprintf(stderr, "Failed to send program2: %d\n", result);
+    return;
+}
+printf("Sent program2: %d entries\n", result);
+
+// 3. NOW power on - TI-OS will discover the files
+emu_power_on(emu);
+
+// 4. Boot calculator
+for (int i = 0; i < 100; i++) {
+    emu_run_cycles(emu, 250000);
+}
+
+printf("Calculator booted with pre-loaded programs\n");
+```
+
+### File Format Support
+
+Supported TI-83+ file formats:
+
+- **.8xp**: Programs
+- **.8xv**: Variables (real, complex, lists, matrices)
+- **.8xl**: Lists
+- **.8xm**: Matrices
+- **.8xs**: Strings
+- **.8xg**: Group files (contain multiple variables)
+
+All files must use the standard TI-83+ file format with proper header and checksums.
+
+### Notes
+
+- **Order matters**: Call after `emu_load_rom()`, before `emu_power_on()`
+- **Multiple files**: Can call multiple times to send several files
+- **Flash persistence**: Files persist across `emu_reset()` (flash is not cleared)
+- **Archive vs RAM**: Files are written to flash archive (not RAM)
+- **TI-OS discovery**: TI-OS scans flash during boot and adds files to its catalog
+- **File validation**: The emulator validates file format and checksums
+
+---
+
+## ROM Acquisition
+
+<Warning>
+ROMs are copyrighted by Texas Instruments. You must dump your own ROM from a physical calculator you own.
+</Warning>
+
+To dump a ROM from your TI-84 Plus CE:
+
+1. Use TI-Connect CE software
+2. Connect calculator via USB
+3. Use backup/restore feature to create ROM dump
+
+Alternatively, use community tools like:
+
+- [rom8x](https://github.com/nessotrin/rom8x) - On-calculator ROM dumper
+- [arTIfiCE](https://github.com/yvantt/arTIfiCE) - Jailbreak for ROM access
+
+## See Also
+
+- [Lifecycle](/api/lifecycle) - Create and initialize emulator
+- [Execution](/api/execution) - Run the emulator after loading ROM
+- [State](/api/state) - Save complete emulator state including ROM

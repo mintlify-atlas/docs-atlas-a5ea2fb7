@@ -1,0 +1,338 @@
+---
+title: "TI-84 Plus CE Memory Map"
+description: "Complete address space layout and memory region documentation"
+---
+
+# TI-84 Plus CE Memory Map
+
+The TI-84 Plus CE uses the eZ80's 24-bit address space (16 MB addressable). The memory map is organized into distinct regions for Flash, RAM, and memory-mapped I/O peripherals.
+
+## Address Space Overview
+
+```
+0x000000 ┌─────────────────────────────────────────┐
+         │        Flash Memory (4 MB)              │
+         │  ┌─────────────────────────────────┐   │
+0x000000 │  │ Boot Sector (64 KB)             │   │
+         │  ├─────────────────────────────────┤   │
+0x010000 │  │ OS Code and Data                │   │
+         │  ├─────────────────────────────────┤   │
+0x0C0000 │  │ Archive (Flash Variables)       │   │
+         │  │ - Programs (.8xp)               │   │
+         │  │ - AppVars (.8xv)                │   │
+         │  │ - Lists, Matrices, etc.         │   │
+         │  ├─────────────────────────────────┤   │
+0x3B0000 │  │ Certificate (unused)            │   │
+         │  └─────────────────────────────────┘   │
+0x400000 ├─────────────────────────────────────────┤
+         │     Unmapped Region 1 (9 MB)            │
+         │     (pseudo-random reads)               │
+0xD00000 ├─────────────────────────────────────────┤
+         │          RAM (256 KB)                   │
+         │  ┌─────────────────────────────────┐   │
+0xD00000 │  │ User RAM                        │   │
+         │  ├─────────────────────────────────┤   │
+0xD40000 │  │ VRAM (~150 KB)                  │   │
+         │  │ - LCD Framebuffer               │   │
+         │  │ - Palette                       │   │
+         │  └─────────────────────────────────┘   │
+0xD65800 ├─────────────────────────────────────────┤
+         │     Unmapped Region 2 (2.5 MB)          │
+0xE00000 ├─────────────────────────────────────────┤
+         │   Memory-Mapped I/O (2 MB)              │
+         │  ┌─────────────────────────────────┐   │
+0xE00000 │  │ Control Ports                   │   │
+0xE10000 │  │ Flash Controller                │   │
+0xE30000 │  │ LCD Controller                  │   │
+0xF00000 │  │ Interrupt Controller            │   │
+0xF20000 │  │ Timers (3× GPT)                 │   │
+0xF50000 │  │ Keypad                          │   │
+0xFF0000 │  │ Control Ports (alternate)       │   │
+         │  └─────────────────────────────────┘   │
+0xFFFFFF └─────────────────────────────────────────┘
+```
+
+## Flash Memory (0x000000 - 0x3FFFFF)
+
+**Size**: 4 MB (4,194,304 bytes)  
+**Type**: NOR Flash  
+**Access**: Read-only from user code (writes require unlock sequence)
+
+### Flash Regions
+
+| Address Range | Size | Description |
+|---------------|------|-------------|
+| `0x000000 - 0x00FFFF` | 64 KB | Boot sector (8× 8KB sectors) |
+| `0x010000 - 0x0BFFFF` | 11× 64KB | OS code and data |
+| `0x0C0000 - 0x3AFFFF` | ~3 MB | Archive (user programs/variables) |
+| `0x3B0000 - 0x3FFFFF` | 320 KB | Certificate storage (unused) |
+
+### Flash Archive Layout
+
+Flash archive is organized in **64 KB sectors**. Each sector:
+
+```
+Offset  Content
++0      Sector status byte (0xFC = valid, 0xFF = empty)
++1      Entry 1: [flag][size_lo][size_hi][type1][type2]...
+        Entry 2: [flag][size_lo][size_hi][type1][type2]...
+        ...
+        [0xFF = free space]
+```
+
+**Entry structure**:
+```
+[flag] [size_lo] [size_hi] [type1] [type2] [version]
+[addr_lo] [addr_mid] [addr_hi] [namelen] [name...] [data...]
+```
+
+- **flag**: `0xFC` = valid, `0xF0` = deleted, `0xFE` = temporary
+- **size**: 16-bit LE, byte count after 3-byte header
+- **type1**: Variable type (0x05 = program, 0x15 = appvar, etc.)
+- **type2**: Always 0x00
+- **version**: Typically 0x00
+- **addr**: 24-bit LE self-referential pointer to flag byte
+- **namelen**: Length of name (1-8 bytes)
+- **name**: Variable name bytes
+- **data**: Variable content (includes 2-byte size prefix for programs)
+
+### Flash Timing
+
+#### Parallel Flash (Older Models)
+- **Default**: 10 cycles per read
+- **Configurable**: Via port `0xE10005` (flash wait states)
+- **Unmapped region**: 258 cycles
+
+#### Serial Flash (Newer Models)
+- **Cache hit**: 2-3 cycles
+- **Cache miss**: 197 cycles
+- **Cache**: 2-way set-associative, 128 sets, 32-byte lines
+- **Unmapped region**: 2 cycles
+
+Enable serial flash mode:
+```rust
+emu.set_serial_flash(true);
+```
+
+## RAM (0xD00000 - 0xD657FF)
+
+**Size**: 414,720 bytes (256 KB user + ~150 KB VRAM)  
+**Type**: SRAM  
+**Access**: Read/write, 4 cycles read, 2 cycles write
+
+### RAM Regions
+
+| Address Range | Size | Description |
+|---------------|------|-------------|
+| `0xD00000 - 0xD3FFFF` | 256 KB | User RAM (variables, stack, buffers) |
+| `0xD40000 - 0xD657FF` | ~150 KB | VRAM (framebuffer + palette) |
+
+### Important RAM Addresses
+
+| Address | Size | Description |
+|---------|------|-------------|
+| `0xD00080` | 1 | TI-OS flags byte |
+| `0xD00088` | 1 | APD flags (bit 2 = APD enable) |
+| `0xD000C4` | 1 | MathPrint flag (bit 5) |
+| `0xD00596` | 2 | curRow (cursor row) |
+| `0xD00598` | 2 | curCol (cursor column) |
+
+### VRAM Layout (0xD40000+)
+
+The LCD controller reads VRAM to generate the display:
+
+```
+0xD40000  ┌─────────────────────────────────┐
+          │  Framebuffer 1 (153,600 bytes)  │
+          │  320×240 × 16-bit RGB565        │
+0xD65800  └─────────────────────────────────┘
+          │  Palette (512 bytes)            │
+          │  256 entries × 16-bit BGR1555   │
+          └─────────────────────────────────┘
+```
+
+**Framebuffer format**:
+- **Resolution**: 320×240 pixels
+- **Color depth**: 16 bits per pixel (RGB565 or indexed via palette)
+- **Layout**: Linear, row-major
+- **Address**: `LCD.UPBASE` register (typically `0xD40000`)
+
+**Palette format**:
+- **Entries**: 256 colors
+- **Format**: BGR1555 (bit 15 unused, 5 bits per channel)
+- **Address**: `LCD.UPBASE + 0x200` (when palette enabled)
+
+## Memory-Mapped I/O (0xE00000 - 0xFFFFFF)
+
+**Size**: 2 MB  
+**Access**: Read/write via load/store instructions or IN0/OUT0
+
+### Device Map
+
+| Address Range | Device | Key Registers |
+|---------------|--------|---------------|
+| `0xE00000 - 0xE0FFFF` | Control Ports | CPU speed, power, battery |
+| `0xE10000 - 0xE1FFFF` | Flash Controller | Wait states, unlock |
+| `0xE30000 - 0xE300FF` | LCD Controller | Timing, control, base address |
+| `0xF00000 - 0xF0001F` | Interrupt Controller | Enable, status, acknowledge |
+| `0xF20000 - 0xF2003F` | Timers (3×) | Counter, match, control |
+| `0xF50000 - 0xF5003F` | Keypad | Data, control, status |
+| `0xF80000 - 0xF800FF` | RTC | Seconds, load, control |
+| `0xFF0000 - 0xFF00FF` | Control (alt) | Same as 0xE00000 via IN0/OUT0 |
+
+### Control Ports (0xE00000 / 0xFF0000)
+
+Accessed via memory or IN0/OUT0 instructions:
+
+| Port | Function | Values |
+|------|----------|--------|
+| `0x00` | Power control | Bit 6 = power off |
+| `0x01` | CPU speed | 0=6MHz, 1=12MHz, 2=24MHz, 3=48MHz |
+| `0x02` | Battery status | ADC readout |
+| `0x03` | Device type | Flash type, USB ID |
+| `0x05` | Control flags | Bit 4 = LCD enable |
+| `0x06` | Protected ports | Bit 2 = unlock protected ports |
+| `0x28` | Flash unlock | Bit 2 = flash write enabled |
+
+### Flash Controller (0xE10000)
+
+| Offset | Function | Description |
+|--------|----------|-------------|
+| `0x00` | Flash enable | Enable flash access |
+| `0x01` | Flash size | Size configuration |
+| `0x02` | Flash map | Memory map selection |
+| `0x05` | Wait states | Read timing (0-15 cycles) |
+
+### LCD Controller (0xE30000)
+
+| Offset | Register | Description |
+|--------|----------|-------------|
+| `0x00-0x0F` | Timing | TCON timing parameters |
+| `0x10` | Control | Mode, enable, bits per pixel |
+| `0x18` | Interrupt mask | Enable line compare interrupt |
+| `0x1C` | Interrupt status | Line compare flag |
+| `0x20` | UPBASE | Upper panel base address (framebuffer) |
+| `0x24` | LPBASE | Lower panel base (unused on CE) |
+
+### Interrupt Controller (0xF00000)
+
+| Offset | Function | Bits |
+|--------|----------|------|
+| `0x00` | Enable low | Interrupts 0-7 enable |
+| `0x04` | Enable mid | Interrupts 8-15 enable |
+| `0x08` | Enable high | Interrupts 16-23 enable |
+| `0x10` | Status low | Pending interrupts 0-7 |
+| `0x14` | Status mid | Pending interrupts 8-15 |
+| `0x18` | Status high | Pending interrupts 16-23 |
+
+**Interrupt sources**:
+- Bit 0: ON key
+- Bit 1: Timer 1
+- Bit 2: Timer 2
+- Bit 3: Timer 3
+- Bit 4: RTC
+- Bit 5: Keypad
+- Bit 6: LCD
+- ... (24 sources total)
+
+### Timers (0xF20000)
+
+Three identical general-purpose timers at offsets 0x00, 0x10, 0x20:
+
+| Offset | Register | Description |
+|--------|----------|-------------|
+| `+0x00` | Counter | Current counter value (32-bit) |
+| `+0x04` | Reset value | Reload value (32-bit) |
+| `+0x08` | Match 1 | Interrupt trigger 1 (32-bit) |
+| `+0x0C` | Match 2 | Interrupt trigger 2 (32-bit) |
+| `+0x10` | Control | Enable, mode, interrupt enable |
+
+### Keypad (0xF50000)
+
+| Offset | Register | Description |
+|--------|----------|-------------|
+| `0x00` | Data | Key scan data (16-bit) |
+| `0x02` | Control | Mode (scan/idle/single) |
+| `0x04` | Status | Interrupt status |
+
+**Key matrix**: 8 rows × 7 columns
+
+```
+Row 0: [DOWN] [LEFT] [RIGHT] [UP] - - -
+Row 1: [ENTER] [+/-] [.] [0] [1] [2] [3]
+Row 2: [4] [5] [6] [7] [8] [9] -
+Row 3: [,] [SIN] [APPS] [X,T,θ,n] - [STAT] [PRGM]
+Row 4: [COS] [)] [(] [{x^-1}] [TAN] [^] -
+Row 5: [×] [√] [LOG] [x²] [LN] [STO] -
+Row 6: [÷] [ON] [÷] [CLEAR] [-] [DEL] [2nd]
+```
+
+### RTC (0xF80000)
+
+| Offset | Register | Description |
+|--------|----------|-------------|
+| `0x00` | Seconds | Current time (32-bit) |
+| `0x04` | Alarm | Alarm time (32-bit) |
+| `0x08` | Control | Interrupt enable, load trigger |
+| `0x0C` | Load status | Bit flags for pending loads |
+
+## Memory Protection
+
+The eZ80 supports memory protection via control ports:
+
+### Privileged/Unprivileged Code
+
+- **Privileged**: PC ≤ privileged boundary (port 0x1E)
+- **Unprivileged**: PC > privileged boundary
+
+**Restrictions for unprivileged code**:
+- Cannot write to flash
+- Cannot write to protected RAM range (ports 0x08-0x0A)
+- Cannot write below stack limit (port 0x0B)
+
+**Violations trigger NMI** (non-maskable interrupt)
+
+### Protected Registers
+
+- **Port 0x06 bit 2**: Must be set to access privileged ports
+- **Port 0x28 bit 2**: Must be set for flash writes (after unlock sequence)
+
+## Address Decoding
+
+The bus uses the top nibble (bits 23-20) for coarse routing:
+
+```rust
+fn decode_address(addr: u32) -> MemoryRegion {
+    match addr >> 20 {
+        0x0..=0xB => Flash,       // 0x000000-0xBFFFFF (mirrors after 4MB)
+        0xC       => Unmapped,    // 0xC00000-0xCFFFFF
+        0xD       => {
+            if addr < 0xD65800 {
+                if addr >= 0xD40000 { Vram } else { Ram }
+            } else { Unmapped }
+        }
+        0xE..=0xF => Ports,       // 0xE00000-0xFFFFFF
+        _         => Unmapped,
+    }
+}
+```
+
+## Cycle Timing Summary
+
+| Access Type | Cycles | Notes |
+|-------------|--------|-------|
+| Flash read (parallel) | 10 | Configurable via port 0xE10005 |
+| Flash read (serial hit) | 2-3 | Cache-dependent |
+| Flash read (serial miss) | 197 | Cache line fetch |
+| RAM read | 4 | Fixed |
+| RAM write | 2 | Fixed |
+| Port read | 2-4 | Depends on device (see port map) |
+| Port write | 2-4 | Delay + rewind mechanism |
+| Unmapped (parallel) | 258 | Open bus |
+| Unmapped (serial) | 2 | Fast rejection |
+
+## Next Steps
+
+- [Emulator Core](/concepts/emulator-core) - Core architecture overview
+- [Dual Backend](/concepts/dual-backend) - Flash timing mode details
+- [CPU](/concepts/cpu) - eZ80 instruction execution and addressing

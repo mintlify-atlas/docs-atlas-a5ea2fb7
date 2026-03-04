@@ -1,0 +1,430 @@
+---
+title: 'WASM Bindings'
+description: 'Build and load the WebAssembly emulator package'
+---
+
+## Overview
+
+The TI-84 Plus CE emulator core can be compiled to WebAssembly for use in web applications. The WASM bindings provide a JavaScript-friendly API using `wasm-bindgen`.
+
+## Building the WASM Package
+
+### Prerequisites
+
+1. Install Rust and the WASM target:
+
+```bash
+rustup target add wasm32-unknown-unknown
+```
+
+2. Install wasm-pack:
+
+```bash
+cargo install wasm-pack
+```
+
+### Build Command
+
+From the `web/` directory:
+
+```bash
+npm run wasm
+```
+
+Or build directly with wasm-pack from the project root:
+
+```bash
+wasm-pack build core --target web --release --out-dir ../web/src/emu-core
+```
+
+**Build options:**
+- `--target web` - Generates ES module imports for browser use
+- `--release` - Optimized build (~96KB gzipped)
+- `--out-dir` - Output directory for generated files
+
+**Generated files:**
+- `emu_core.js` - JavaScript module with initialization and bindings
+- `emu_core_bg.wasm` - Compiled WebAssembly binary
+- `emu_core.d.ts` - TypeScript definitions
+
+## Loading in JavaScript/TypeScript
+
+### Basic Setup
+
+Import the WASM module and initialize it:
+
+```typescript
+import init, { WasmEmu } from './emu-core/emu_core';
+
+// Initialize WASM (loads and compiles the .wasm file)
+await init();
+
+// Create emulator instance
+const emu = new WasmEmu();
+```
+
+### Singleton Pattern
+
+The emulator uses a singleton pattern to prevent concurrent initialization:
+
+```typescript
+import init, { WasmEmu } from './emu-core/emu_core';
+
+let wasmInitPromise: Promise<void> | null = null;
+let wasmMemory: WebAssembly.Memory | null = null;
+
+function initWasm(): Promise<void> {
+  if (!wasmInitPromise) {
+    wasmInitPromise = init().then((output) => {
+      wasmMemory = output.memory;
+    }).catch((err) => {
+      wasmInitPromise = null; // Reset on failure
+      throw err;
+    });
+  }
+  return wasmInitPromise;
+}
+```
+
+This prevents issues with React StrictMode double-mounting or other concurrent initialization attempts.
+
+## Loading and Running a ROM
+
+### Complete Example
+
+```typescript
+import init, { WasmEmu } from './emu-core/emu_core';
+
+// Initialize WASM
+await init();
+
+// Create emulator
+const emu = new WasmEmu();
+
+// Load ROM file
+const romData = await fetch('TI-84-CE.rom').then(r => r.arrayBuffer());
+const result = emu.load_rom(new Uint8Array(romData));
+if (result !== 0) {
+  console.error('Failed to load ROM:', result);
+}
+
+// Power on the calculator
+emu.power_on();
+
+// Run emulation loop (60 FPS)
+function frame() {
+  // Run 800,000 cycles per frame (48MHz / 60fps)
+  emu.run_cycles(800_000);
+  
+  // Get framebuffer and render to canvas
+  const rgba = emu.get_framebuffer_rgba();
+  const width = emu.framebuffer_width();
+  const height = emu.framebuffer_height();
+  
+  const imageData = new ImageData(
+    new Uint8ClampedArray(rgba),
+    width,
+    height
+  );
+  ctx.putImageData(imageData, 0, 0);
+  
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+```
+
+## Handling Key Input
+
+The TI-84 Plus CE uses an 8x7 key matrix:
+
+```typescript
+// Key down (row 0-7, col 0-7)
+emu.set_key(row, col, true);
+
+// Key up
+emu.set_key(row, col, false);
+```
+
+**Example keyboard mapping:**
+
+```typescript
+const keyMap: Record<string, [number, number]> = {
+  'Enter': [6, 0],     // ENTER key
+  'Escape': [6, 6],    // CLEAR key
+  '0': [7, 0],         // 0 key
+  '1': [4, 0],         // 1 key
+  // ... more mappings
+};
+
+window.addEventListener('keydown', (e) => {
+  const mapping = keyMap[e.key];
+  if (mapping) {
+    emu.set_key(mapping[0], mapping[1], true);
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  const mapping = keyMap[e.key];
+  if (mapping) {
+    emu.set_key(mapping[0], mapping[1], false);
+  }
+});
+```
+
+## Loading Programs
+
+### Before Boot (Pre-injection)
+
+Inject programs into flash before powering on:
+
+```typescript
+// Load ROM
+emu.load_rom(romData);
+
+// Inject program files
+const programData = await fetch('DOOM.8xp').then(r => r.arrayBuffer());
+const count = emu.send_file(new Uint8Array(programData));
+if (count > 0) {
+  console.log(`Injected ${count} entries`);
+}
+
+// Now power on
+emu.power_on();
+```
+
+### Live Injection (Hot Reload)
+
+Inject programs into a running emulator:
+
+```typescript
+const programData = await fetch('DOOM.8xp').then(r => r.arrayBuffer());
+const count = emu.send_file_live(new Uint8Array(programData));
+if (count > 0) {
+  console.log(`Injected ${count} entries, emulator soft reset`);
+}
+```
+
+The `send_file_live` method invalidates any existing copy and performs a soft reset so the OS discovers the new program.
+
+## State Persistence
+
+### Save State
+
+Capture the complete emulator state:
+
+```typescript
+const stateData = emu.save_state();
+
+// Save to localStorage
+localStorage.setItem('calc-state', 
+  btoa(String.fromCharCode(...stateData))
+);
+
+// Or save to IndexedDB
+const db = await openDB('calc-db', 1);
+await db.put('states', stateData, 'autosave');
+```
+
+### Load State
+
+Restore a saved state:
+
+```typescript
+// Load from localStorage
+const encoded = localStorage.getItem('calc-state');
+if (encoded) {
+  const stateData = Uint8Array.from(
+    atob(encoded),
+    c => c.charCodeAt(0)
+  );
+  const result = emu.load_state(stateData);
+  if (result === 0) {
+    console.log('State restored');
+  }
+}
+```
+
+**Note:** The WASM backend uses a custom snapshot format that includes WASM memory state. See `RustBackend.ts:136-191` for implementation details.
+
+## Display Status
+
+### LCD State
+
+Check if the LCD should display content:
+
+```typescript
+if (emu.is_lcd_on()) {
+  // Render framebuffer
+} else {
+  // Show blank screen
+}
+```
+
+### Device Power State
+
+Check if the calculator is sleeping:
+
+```typescript
+if (emu.is_device_off()) {
+  // Show "Press ON to wake" message
+}
+```
+
+### Backlight Brightness
+
+Get the current backlight level:
+
+```typescript
+const brightness = emu.get_backlight(); // 0-255
+canvas.style.filter = `brightness(${brightness / 255})`;
+```
+
+## Debugging
+
+### Diagnostic Status
+
+Get debug information:
+
+```typescript
+console.log(emu.debug_status());
+// Output: "pc=123456 halted=false total_cycles=1000000 ..."
+
+console.log(emu.dump_state());
+// Full state dump with registers, flags, and peripheral state
+```
+
+### Console Logging
+
+The WASM module logs events to the browser console:
+
+```typescript
+// Enable panic hook for better error messages
+console_error_panic_hook::set_once();
+
+// Logs appear in console:
+// [WASM] load_rom: 4194304 bytes
+// [WASM] load_rom: success
+// [WASM] power_on
+```
+
+## Performance Considerations
+
+### Frame Rate
+
+Target 60 FPS with 800,000 cycles per frame:
+
+```typescript
+const CYCLES_PER_FRAME = 800_000; // 48MHz / 60fps
+
+function runFrame() {
+  const executed = emu.run_cycles(CYCLES_PER_FRAME);
+  
+  // Render frame
+  const rgba = emu.get_framebuffer_rgba();
+  updateCanvas(rgba);
+  
+  requestAnimationFrame(runFrame);
+}
+```
+
+### Framebuffer Format
+
+The framebuffer is returned as RGBA8888 (ready for `ImageData`):
+
+```typescript
+const rgba = emu.get_framebuffer_rgba(); // Vec<u8>
+const imageData = new ImageData(
+  new Uint8ClampedArray(rgba),
+  320, // width
+  240  // height
+);
+```
+
+**Note:** The internal format is ARGB8888, but `get_framebuffer_rgba()` converts to RGBA8888 for canvas compatibility.
+
+## Error Handling
+
+### Return Codes
+
+Methods return integer error codes:
+
+```typescript
+const result = emu.load_rom(romData);
+if (result !== 0) {
+  switch (result) {
+    case -1: console.error('Invalid ROM data'); break;
+    case -2: console.error('ROM too small'); break;
+    case -3: console.error('ROM too large'); break;
+    default: console.error('Unknown error:', result);
+  }
+}
+```
+
+### File Injection Errors
+
+```typescript
+const count = emu.send_file(programData);
+if (count < 0) {
+  switch (count) {
+    case -10: console.error('ROM not loaded'); break;
+    case -11: console.error('Parse error'); break;
+    case -12: console.error('No flash space'); break;
+    case -13: console.error('Already booted'); break;
+    default: console.error('Unknown error:', count);
+  }
+}
+```
+
+## Memory Management
+
+### Cleanup
+
+The `WasmEmu` instance should be freed when done:
+
+```typescript
+emu.free(); // Release WASM memory
+```
+
+**Note:** The `RustBackend` class handles cleanup automatically, catching errors if the instance is still borrowed:
+
+```typescript
+try {
+  this.emu.free();
+} catch (e) {
+  console.warn('Error during cleanup (safe to ignore):', e);
+}
+```
+
+## TypeScript Types
+
+The generated `emu_core.d.ts` provides full TypeScript definitions:
+
+```typescript
+export class WasmEmu {
+  free(): void;
+  constructor();
+  load_rom(data: Uint8Array): number;
+  send_file(data: Uint8Array): number;
+  send_file_live(data: Uint8Array): number;
+  power_on(): void;
+  reset(): void;
+  run_cycles(cycles: number): number;
+  framebuffer_width(): number;
+  framebuffer_height(): number;
+  get_framebuffer_rgba(): Uint8Array;
+  set_key(row: number, col: number, down: boolean): void;
+  get_backlight(): number;
+  is_lcd_on(): boolean;
+  is_device_off(): boolean;
+  save_state(): Uint8Array;
+  load_state(data: Uint8Array): number;
+  debug_status(): string;
+  dump_state(): string;
+}
+```
+
+## See Also
+
+- [EmulatorBackend Interface](/api/backend-interface) - TypeScript interface specification
+- Source: `core/src/wasm.rs` - WASM bindings implementation
+- Source: `web/src/emulator/RustBackend.ts` - Browser integration layer

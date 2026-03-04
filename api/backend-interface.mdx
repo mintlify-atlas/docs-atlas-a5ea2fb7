@@ -1,0 +1,626 @@
+---
+title: 'EmulatorBackend Interface'
+description: 'TypeScript interface for emulator backends'
+---
+
+## Overview
+
+The `EmulatorBackend` interface defines the common API for all emulator backends (Rust WASM, CEmu). This abstraction allows the web app to switch between backends without code changes.
+
+## Interface Definition
+
+Source: `web/src/emulator/types.ts`
+
+```typescript
+export type BackendType = 'rust' | 'cemu';
+
+export interface EmulatorBackend {
+  // Lifecycle
+  init(): Promise<void>;
+  destroy(): void;
+
+  // ROM loading
+  loadRom(data: Uint8Array): Promise<number>;
+  sendFile(data: Uint8Array): number;
+  sendFileLive(data: Uint8Array): number;
+  powerOn(): void;
+  reset(): void;
+
+  // Execution
+  runCycles(cycles: number): number;
+  runFrame(): void;
+
+  // Display
+  getFramebufferWidth(): number;
+  getFramebufferHeight(): number;
+  getFramebufferRGBA(): Uint8Array;
+
+  // Input
+  setKey(row: number, col: number, down: boolean): void;
+
+  // State persistence
+  saveState(): Uint8Array | null;
+  loadState(data: Uint8Array): boolean;
+
+  // State queries
+  isLcdOn(): boolean;
+
+  // Info
+  readonly name: string;
+  readonly isInitialized: boolean;
+  readonly isRomLoaded: boolean;
+}
+```
+
+## Lifecycle Methods
+
+### `init(): Promise<void>`
+
+Initialize the backend and load the WASM module.
+
+**Example:**
+
+```typescript
+const backend = new RustBackend();
+await backend.init();
+console.log('Backend initialized:', backend.name);
+```
+
+**Notes:**
+- Must be called before any other methods
+- Uses singleton pattern to prevent concurrent initialization
+- May retry once on failure to handle HMR or StrictMode issues
+
+### `destroy(): void`
+
+Clean up backend resources and free WASM memory.
+
+**Example:**
+
+```typescript
+backend.destroy();
+```
+
+**Notes:**
+- Safe to call multiple times
+- Catches and ignores errors if WASM instance is borrowed
+- Resets `isInitialized` and `isRomLoaded` flags
+
+## ROM Loading Methods
+
+### `loadRom(data: Uint8Array): Promise<number>`
+
+Load a TI-84 Plus CE ROM file into the emulator.
+
+**Parameters:**
+- `data` - ROM file bytes (typically 4MB)
+
+**Returns:**
+- `0` on success
+- Negative error code on failure
+
+**Example:**
+
+```typescript
+const response = await fetch('TI-84-CE.rom');
+const romData = new Uint8Array(await response.arrayBuffer());
+
+const result = await backend.loadRom(romData);
+if (result === 0) {
+  console.log('ROM loaded successfully');
+  console.log('ROM loaded:', backend.isRomLoaded);
+} else {
+  console.error('ROM load failed:', result);
+}
+```
+
+### `sendFile(data: Uint8Array): number`
+
+Inject a program file (.8xp) or AppVar (.8xv) into flash before boot.
+
+**Parameters:**
+- `data` - File bytes (.8xp or .8xv format)
+
+**Returns:**
+- Number of entries injected (≥0) on success
+- Negative error code on failure
+
+**Example:**
+
+```typescript
+const program = await fetch('DOOM.8xp').then(r => r.arrayBuffer());
+const count = backend.sendFile(new Uint8Array(program));
+
+if (count >= 0) {
+  console.log(`Injected ${count} entries`);
+} else {
+  console.error('Injection failed:', count);
+}
+```
+
+**Error codes:**
+- `-10` - ROM not loaded
+- `-11` - Parse error
+- `-12` - No flash space
+- `-13` - Already booted
+
+**Notes:**
+- Must be called after `loadRom()` but before `powerOn()`
+- Files are injected into the flash archive
+- TI-OS will discover them on next boot
+
+### `sendFileLive(data: Uint8Array): number`
+
+Inject a file into a running emulator (hot reload).
+
+**Parameters:**
+- `data` - File bytes (.8xp or .8xv format)
+
+**Returns:**
+- Number of entries injected (≥0) on success
+- Negative error code on failure
+
+**Example:**
+
+```typescript
+const program = await fetch('DOOM.8xp').then(r => r.arrayBuffer());
+const count = backend.sendFileLive(new Uint8Array(program));
+
+if (count >= 0) {
+  console.log(`Injected ${count} entries, emulator reset`);
+}
+```
+
+**Notes:**
+- Can be called while emulator is running
+- Invalidates any existing copy of the program
+- Performs a soft reset so TI-OS discovers the new file
+- Use this for "hot reload" workflow during development
+
+### `powerOn(): void`
+
+Simulate pressing the ON button to boot the calculator.
+
+**Example:**
+
+```typescript
+await backend.loadRom(romData);
+backend.powerOn();
+// Calculator boots and displays home screen
+```
+
+**Notes:**
+- Must be called after `loadRom()` to start emulation
+- Simulates a physical ON key press and release
+- CPU begins executing from reset vector
+
+### `reset(): void`
+
+Reset the emulator to its initial state.
+
+**Example:**
+
+```typescript
+backend.reset();
+// Emulator resets, ROM must be loaded again
+```
+
+**Notes:**
+- Clears all RAM and registers
+- ROM must be reloaded after reset
+- Use `powerOn()` for a soft reset instead
+
+## Execution Methods
+
+### `runCycles(cycles: number): number`
+
+Execute the emulator for a specified number of CPU cycles.
+
+**Parameters:**
+- `cycles` - Number of cycles to execute
+
+**Returns:**
+- Number of cycles actually executed
+
+**Example:**
+
+```typescript
+// Run one frame at 48MHz (800,000 cycles at 60fps)
+const executed = backend.runCycles(800_000);
+console.log(`Executed ${executed} cycles`);
+```
+
+**Notes:**
+- Automatically updates the framebuffer
+- Returns early if CPU halts or encounters errors
+- May execute fewer cycles than requested
+
+### `runFrame(): void`
+
+Convenience method to run one frame (800,000 cycles at 60 FPS).
+
+**Example:**
+
+```typescript
+function emulationLoop() {
+  backend.runFrame();
+  requestAnimationFrame(emulationLoop);
+}
+requestAnimationFrame(emulationLoop);
+```
+
+**Notes:**
+- Equivalent to `runCycles(800_000)`
+- Assumes 48MHz CPU speed and 60 FPS refresh rate
+
+## Display Methods
+
+### `getFramebufferWidth(): number`
+
+Get the framebuffer width in pixels.
+
+**Returns:**
+- Width (typically 320)
+
+**Example:**
+
+```typescript
+const width = backend.getFramebufferWidth(); // 320
+```
+
+### `getFramebufferHeight(): number`
+
+Get the framebuffer height in pixels.
+
+**Returns:**
+- Height (typically 240)
+
+**Example:**
+
+```typescript
+const height = backend.getFramebufferHeight(); // 240
+```
+
+### `getFramebufferRGBA(): Uint8Array`
+
+Get the framebuffer data in RGBA8888 format.
+
+**Returns:**
+- Uint8Array with RGBA bytes (width × height × 4 bytes)
+
+**Example:**
+
+```typescript
+const rgba = backend.getFramebufferRGBA();
+const width = backend.getFramebufferWidth();
+const height = backend.getFramebufferHeight();
+
+const imageData = new ImageData(
+  new Uint8ClampedArray(rgba),
+  width,
+  height
+);
+canvasContext.putImageData(imageData, 0, 0);
+```
+
+**Notes:**
+- Format is RGBA8888 (4 bytes per pixel: R, G, B, A)
+- Ready for direct use with Canvas `ImageData`
+- Internal format is ARGB8888 but converted for canvas compatibility
+
+## Input Methods
+
+### `setKey(row: number, col: number, down: boolean): void`
+
+Set the state of a key in the 8×7 key matrix.
+
+**Parameters:**
+- `row` - Key row (0-7)
+- `col` - Key column (0-7)
+- `down` - `true` for pressed, `false` for released
+
+**Example:**
+
+```typescript
+// Press ENTER key (row 6, col 0)
+backend.setKey(6, 0, true);
+
+// Release ENTER key
+backend.setKey(6, 0, false);
+```
+
+**Key Matrix Reference:**
+
+| Row | Col 0 | Col 1 | Col 2 | Col 3 | Col 4 | Col 5 | Col 6 |
+|-----|-------|-------|-------|-------|-------|-------|-------|
+| 0   | Graph | Trace | Zoom  | Window| Y=    | 2nd   | Mode  |
+| 1   | X,T,θ,n | Stat | -     | )     | (     | ,     | ^     |
+| 2   | Tan   | Vars  | -     | )     | (     | /     | Clear |
+| 3   | Cos   | Prgm  | -     | 9     | 6     | 3     | (-)   |
+| 4   | Sin   | Apps  | -     | 8     | 5     | 2     | .     |
+| 5   | Math  | XInv  | -     | 7     | 4     | 1     | 0     |
+| 6   | Alpha | Store | -     | Down  | Right | Left  | Enter |
+| 7   | Del   | -     | -     | Up    | +     | -     | *     |
+
+## State Persistence Methods
+
+### `saveState(): Uint8Array | null`
+
+Capture the complete emulator state.
+
+**Returns:**
+- `Uint8Array` containing state data
+- `null` if ROM not loaded or save failed
+
+**Example:**
+
+```typescript
+const state = backend.saveState();
+if (state) {
+  // Save to localStorage
+  localStorage.setItem('calc-state', 
+    btoa(String.fromCharCode(...state))
+  );
+}
+```
+
+**State includes:**
+- All CPU registers (PC, SP, AF, BC, DE, HL, IX, IY)
+- All RAM and VRAM contents
+- All peripheral states (LCD, timers, interrupts)
+- WASM memory snapshot (for Rust backend)
+
+### `loadState(data: Uint8Array): boolean`
+
+Restore a previously saved state.
+
+**Parameters:**
+- `data` - State data from `saveState()`
+
+**Returns:**
+- `true` on success
+- `false` on failure
+
+**Example:**
+
+```typescript
+const encoded = localStorage.getItem('calc-state');
+if (encoded) {
+  const state = Uint8Array.from(
+    atob(encoded),
+    c => c.charCodeAt(0)
+  );
+  
+  const success = backend.loadState(state);
+  if (success) {
+    console.log('State restored');
+  }
+}
+```
+
+**Notes:**
+- State format is backend-specific (Rust vs CEmu)
+- States are not portable between backends
+- For Rust backend, includes WASM memory snapshot with header
+
+## State Query Methods
+
+### `isLcdOn(): boolean`
+
+Check if the LCD should display content.
+
+**Returns:**
+- `true` if LCD is powered on and should display
+- `false` if LCD is off (show blank screen)
+
+**Example:**
+
+```typescript
+if (backend.isLcdOn()) {
+  // Render framebuffer
+  const rgba = backend.getFramebufferRGBA();
+  renderToCanvas(rgba);
+} else {
+  // Show blank/black screen
+  clearCanvas();
+}
+```
+
+**Notes:**
+- LCD is off when control port 0x05 bit 4 is clear
+- LCD is off when lcd.control bit 11 is clear
+- This is separate from device sleep state
+
+## Info Properties
+
+### `name: string`
+
+Readonly name of the backend implementation.
+
+**Example:**
+
+```typescript
+console.log(backend.name); // "Rust (Custom)" or "CEmu"
+```
+
+### `isInitialized: boolean`
+
+Readonly flag indicating if backend is initialized.
+
+**Example:**
+
+```typescript
+if (!backend.isInitialized) {
+  await backend.init();
+}
+```
+
+### `isRomLoaded: boolean`
+
+Readonly flag indicating if a ROM is loaded.
+
+**Example:**
+
+```typescript
+if (!backend.isRomLoaded) {
+  await backend.loadRom(romData);
+}
+```
+
+## Implementation: RustBackend
+
+The Rust WASM backend implementation:
+
+**Source:** `web/src/emulator/RustBackend.ts`
+
+```typescript
+export class RustBackend implements EmulatorBackend {
+  readonly name = 'Rust (Custom)';
+  private emu: WasmEmu | null = null;
+  private _isInitialized = false;
+  private _isRomLoaded = false;
+
+  get isInitialized(): boolean {
+    return this._isInitialized;
+  }
+
+  get isRomLoaded(): boolean {
+    return this._isRomLoaded;
+  }
+
+  async init(): Promise<void> {
+    await initWasm();
+    try {
+      this.emu = new WasmEmu();
+    } catch (e) {
+      // Retry once for HMR/StrictMode
+      console.warn('RustBackend: WasmEmu creation failed, retrying:', e);
+      await new Promise((r) => setTimeout(r, 0));
+      this.emu = new WasmEmu();
+    }
+    this._isInitialized = true;
+  }
+
+  // ... other methods
+}
+```
+
+**Key features:**
+- Singleton WASM initialization
+- Automatic retry on initialization failure
+- Custom state snapshot format with WASM memory
+- Error handling for WASM borrowing issues
+
+## Complete Usage Example
+
+```typescript
+import { RustBackend } from './emulator/RustBackend';
+import type { EmulatorBackend } from './emulator/types';
+
+class EmulatorApp {
+  private backend: EmulatorBackend;
+  private canvas: HTMLCanvasElement;
+  private ctx: CanvasRenderingContext2D;
+
+  async init() {
+    // Initialize backend
+    this.backend = new RustBackend();
+    await this.backend.init();
+
+    // Setup canvas
+    this.canvas = document.getElementById('screen') as HTMLCanvasElement;
+    this.ctx = this.canvas.getContext('2d')!;
+    this.canvas.width = 320;
+    this.canvas.height = 240;
+
+    // Load ROM
+    const romData = await this.loadRom('TI-84-CE.rom');
+    await this.backend.loadRom(romData);
+
+    // Optional: Load program
+    const program = await this.loadFile('DOOM.8xp');
+    this.backend.sendFile(program);
+
+    // Power on
+    this.backend.powerOn();
+
+    // Start emulation loop
+    this.run();
+  }
+
+  private async loadRom(url: string): Promise<Uint8Array> {
+    const response = await fetch(url);
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  private async loadFile(url: string): Promise<Uint8Array> {
+    const response = await fetch(url);
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  private run() {
+    // Run one frame
+    this.backend.runFrame();
+
+    // Render
+    if (this.backend.isLcdOn()) {
+      const rgba = this.backend.getFramebufferRGBA();
+      const imageData = new ImageData(
+        new Uint8ClampedArray(rgba),
+        320,
+        240
+      );
+      this.ctx.putImageData(imageData, 0, 0);
+    } else {
+      this.ctx.fillStyle = 'black';
+      this.ctx.fillRect(0, 0, 320, 240);
+    }
+
+    // Continue loop
+    requestAnimationFrame(() => this.run());
+  }
+
+  private handleKeyDown(row: number, col: number) {
+    this.backend.setKey(row, col, true);
+  }
+
+  private handleKeyUp(row: number, col: number) {
+    this.backend.setKey(row, col, false);
+  }
+
+  public saveState() {
+    const state = this.backend.saveState();
+    if (state) {
+      localStorage.setItem('calc-state', 
+        btoa(String.fromCharCode(...state))
+      );
+    }
+  }
+
+  public loadState() {
+    const encoded = localStorage.getItem('calc-state');
+    if (encoded) {
+      const state = Uint8Array.from(
+        atob(encoded),
+        c => c.charCodeAt(0)
+      );
+      this.backend.loadState(state);
+    }
+  }
+
+  public destroy() {
+    this.backend.destroy();
+  }
+}
+
+// Usage
+const app = new EmulatorApp();
+await app.init();
+```
+
+## See Also
+
+- [WASM Bindings](/api/wasm-bindings) - Building and loading the WASM package
+- Source: `web/src/emulator/types.ts` - Interface definition
+- Source: `web/src/emulator/RustBackend.ts` - Rust backend implementation
+- Source: `core/src/wasm.rs` - WASM bindings

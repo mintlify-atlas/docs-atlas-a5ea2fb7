@@ -1,0 +1,455 @@
+---
+title: Architecture
+description: Deep dive into the emulator's design, dual backend system, and Rust core implementation
+---
+
+# Architecture
+
+The TI-84 Plus CE emulator is designed as a cross-platform system with a clean separation between the emulation core and platform-specific UI code. This architecture enables the same emulator to run on web, Android, and iOS with minimal platform-specific code.
+
+## System Overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                      App (UI)                           │
+│              Android (Kotlin/Compose)                   │
+│              iOS (Swift/SwiftUI)                        │
+│              Web (React/TypeScript)                     │
+├─────────────────────────────────────────────────────────┤
+│            C API (emu.h) / WASM Bindings                │
+│    emu_create, emu_load_rom, emu_run_cycles,            │
+│    emu_framebuffer, emu_set_key, ...                    │
+├───────────────────────┬─────────────────────────────────┤
+│   Rust Core           │   CEmu Adapter                  │
+│   (libemu_core.a)     │   (libcemu_adapter.a)           │
+│   (emu_core.wasm)     │   (cemu.wasm via Emscripten)    │
+│                       │                                 │
+│   Our implementation  │   Wraps CEmu reference          │
+│   from scratch        │   emulator                      │
+└───────────────────────┴─────────────────────────────────┘
+```
+
+## Dual Backend Design
+
+The mobile apps (Android & iOS) and web app are designed to work with **two interchangeable emulator backends**:
+
+### Rust Core (Default)
+
+Our from-scratch implementation written in Rust:
+
+- **Fully custom** - No external emulator dependencies
+- **Small binary** - WASM is ~96KB gzipped for web
+- **Fast** - Optimized Rust compiled to native code or WASM
+- **Platform-agnostic** - Zero OS dependencies, works everywhere
+
+### CEmu Backend (Reference)
+
+[CEmu](https://github.com/CE-Programming/CEmu) is the established open-source TI-84 Plus CE emulator:
+
+- **Battle-tested** - Years of development and bug fixes
+- **Reference implementation** - Used for parity testing
+- **Known-correct behavior** - When our Rust core differs, CEmu is usually right
+
+<Note>
+  Both backends implement the same C API defined in `core/include/emu.h`, allowing apps to switch between them at build time without any code changes.
+</Note>
+
+### Why Two Backends?
+
+The dual backend design serves several purposes:
+
+<CardGroup cols={2}>
+  <Card title="Parity Testing" icon="check-double">
+    Compare our Rust core behavior against CEmu to verify correctness. Any differences reveal bugs in our implementation.
+  </Card>
+  
+  <Card title="Bug Investigation" icon="bug">
+    When something breaks, switch to CEmu to determine if it's our bug or a ROM/hardware quirk that CEmu also exhibits.
+  </Card>
+  
+  <Card title="Feature Development" icon="code">
+    Test new UI features (touch input, menus, file loading) before Rust implementation catches up with all peripherals.
+  </Card>
+  
+  <Card title="Performance Baseline" icon="gauge">
+    Compare frame rates and responsiveness between backends to identify optimization opportunities.
+  </Card>
+</CardGroup>
+
+## Rust Core Structure
+
+The Rust core (`core/`) is organized into several modules that mirror the TI-84 Plus CE hardware architecture.
+
+### Module Organization
+
+From `core/src/lib.rs:6-32`:
+
+```rust
+//! # Architecture
+//!
+//! The emulator is organized into several modules:
+//! - `memory`: Flash, RAM, and port memory implementations
+//! - `bus`: Address decoding and memory access routing
+//! - `cpu`: eZ80 CPU implementation
+//! - `emu`: Main emulator orchestrator
+//!
+//! # Memory Map (24-bit eZ80 address space)
+//!
+//! | Address Range       | Region              |
+//! |---------------------|---------------------|
+//! | 0x000000 - 0x3FFFFF | Flash (4MB)         |
+//! | 0x400000 - 0xCFFFFF | Unmapped            |
+//! | 0xD00000 - 0xD657FF | RAM + VRAM          |
+//! | 0xD65800 - 0xDFFFFF | Unmapped            |
+//! | 0xE00000 - 0xFFFFFF | Memory-mapped I/O   |
+```
+
+### Key Components
+
+<AccordionGroup>
+  <Accordion title="CPU (cpu/)">
+    The eZ80 CPU implementation with:
+    
+    - **Full instruction set** - All Z80 and eZ80 opcodes
+    - **ADL mode** - 24-bit addressing extension
+    - **Cycle-accurate timing** - Matches hardware cycle counts
+    - **Flag computation** - Accurate S, Z, H, P/V, N, C flags
+    
+    The eZ80 is an enhanced Z80 with 24-bit addressing and additional instructions like `MLT`, `LEA`, and special indexed load/store operations.
+  </Accordion>
+
+  <Accordion title="Memory (memory/)">
+    Memory subsystem implementations:
+    
+    - **Flash** - 4MB non-volatile storage (sectors 0-255)
+    - **RAM** - 256KB system RAM
+    - **VRAM** - Video RAM for LCD (320x240x16-bit)
+    - **Port Memory** - Memory-mapped I/O registers
+    
+    The memory system handles wait states for flash access (typically 2-3 cycles per read).
+  </Accordion>
+
+  <Accordion title="Bus (bus/)">
+    Address decoding and memory routing:
+    
+    - **24-bit address space** - Full eZ80 addressing
+    - **Region detection** - Routes reads/writes to correct subsystem
+    - **Wait state handling** - Adds extra cycles for flash access
+    - **I/O event tracking** - Records peripheral operations for debugging
+    
+    The bus determines which device handles each memory access based on address ranges.
+  </Accordion>
+
+  <Accordion title="Peripherals (peripherals/)">
+    Hardware peripheral implementations:
+    
+    - **LCD Controller** - 320x240 16-bit color display at 0xE30000
+    - **Keypad** - 8x7 key matrix at 0xF50000
+    - **Timers** - 3 general-purpose timers at 0xF20000
+    - **RTC** - Real-time clock for date/time
+    - **Interrupts** - Interrupt controller at 0xF00000
+    - **Backlight** - LCD backlight control
+    
+    Each peripheral is mapped to specific address ranges and may generate interrupts.
+  </Accordion>
+
+  <Accordion title="Scheduler (scheduler/)">
+    Cycle-accurate event scheduling:
+    
+    - **Event queue** - Priority queue of pending events
+    - **Cycle counting** - Tracks total emulated cycles
+    - **Timer callbacks** - Fires events at specific cycle counts
+    - **Peripheral coordination** - Schedules LCD refreshes, timer ticks, etc.
+    
+    The scheduler ensures peripherals update at the correct cycle counts for hardware-accurate timing.
+  </Accordion>
+
+  <Accordion title="Emulator (emu/)">
+    Main orchestrator that ties everything together:
+    
+    - **Initialization** - Sets up CPU, memory, peripherals
+    - **Execution loop** - Runs CPU for requested cycles
+    - **Frame rendering** - Converts VRAM to ARGB8888 framebuffer
+    - **State management** - Save/load emulator state
+    - **File injection** - Loads .8xp/.8xv programs into flash
+  </Accordion>
+</AccordionGroup>
+
+## Memory Map
+
+The TI-84 Plus CE uses a 24-bit address space (16MB addressable). Here's the complete memory layout:
+
+| Address Range     | Size    | Description                    | Wait States |
+|-------------------|---------|--------------------------------|-------------|
+| 0x000000-0x3FFFFF | 4MB     | Flash ROM                      | 2-3 cycles  |
+| 0x400000-0xCFFFFF | 9MB     | Unmapped (returns 0xFF)        | 0           |
+| 0xD00000-0xD3FFFF | 256KB   | System RAM                     | 0           |
+| 0xD40000-0xD657FF | ~150KB  | Video RAM (VRAM)               | 0           |
+| 0xD65800-0xDFFFFF | ~2.4MB  | Unmapped                       | 0           |
+| 0xE00000-0xE0FFFF | 64KB    | Control Ports                  | 0           |
+| 0xE10000-0xE1FFFF | 64KB    | Flash Controller               | 0           |
+| 0xE30000-0xE300FF | 256B    | LCD Controller                 | 0           |
+| 0xF00000-0xF0001F | 32B     | Interrupt Controller           | 0           |
+| 0xF20000-0xF2003F | 64B     | Timers (3x GPT)                | 0           |
+| 0xF50000-0xF5003F | 64B     | Keypad Controller              | 0           |
+| 0xFF0000-0xFF00FF | 256B    | Control Ports (OUT0 access)    | 0           |
+
+<Warning>
+  Flash memory has 2-3 wait states per access, making flash reads slower than RAM. The ROM typically copies frequently-accessed code to RAM for performance.
+</Warning>
+
+### Flash Organization
+
+The 4MB flash is organized into 256 sectors of 16KB each:
+
+- **Sectors 0-31** (0x000000-0x07FFFF) - Operating system (TI-OS)
+- **Sectors 32-255** (0x080000-0x3FFFFF) - Archive (user programs, AppVars)
+
+The flash controller at 0xE10000 manages sector erases and programming operations.
+
+### RAM Layout
+
+The 256KB system RAM is divided into regions used by TI-OS:
+
+- **Low RAM** - Stack, system variables, interrupt vectors
+- **User Memory** - Program variables, lists, matrices
+- **VAT** (Variable Allocation Table) - Tracks variable locations
+- **Command Shadow** - Screen buffer for text mode
+
+### VRAM Format
+
+VRAM stores the 320x240 display as 16-bit color values:
+
+- **Format**: 565 RGB (5 bits red, 6 bits green, 5 bits blue)
+- **Size**: 320 × 240 × 2 bytes = 150KB
+- **Layout**: Row-major, left-to-right, top-to-bottom
+
+The emulator converts this to ARGB8888 format for the framebuffer.
+
+## C API Interface
+
+The emulator core exposes a simple C API defined in `core/include/emu.h`. This API is used by all platform apps (Android JNI, iOS Swift, web WASM).
+
+### Core Functions
+
+From `core/include/emu.h:12-48`:
+
+```c
+// Lifecycle
+Emu* emu_create(void);
+void emu_destroy(Emu*);
+void emu_set_log_callback(emu_log_cb_t cb);
+
+// ROM loading (bytes only)
+int  emu_load_rom(Emu*, const uint8_t* data, size_t len);
+
+// Send .8xp/.8xv file (injects into flash archive before boot)
+int  emu_send_file(Emu*, const uint8_t* data, size_t len);
+
+void emu_reset(Emu*);
+void emu_power_on(Emu*);  // Simulate ON key press+release
+
+// Execution
+int  emu_run_cycles(Emu*, int cycles);  // Returns executed cycles
+
+// Framebuffer (owned by core), ARGB8888
+const uint32_t* emu_framebuffer(const Emu*, int* w, int* h);
+
+// Input
+void emu_set_key(Emu*, int row, int col, int down);
+
+// Display
+uint8_t emu_get_backlight(const Emu*);  // 0-255
+int emu_is_lcd_on(const Emu*);
+
+// Save states
+size_t emu_save_state_size(const Emu*);
+int    emu_save_state(const Emu*, uint8_t* out, size_t cap);
+int    emu_load_state(Emu*, const uint8_t* data, size_t len);
+```
+
+### Thread Safety
+
+From `core/src/lib.rs:54-68`:
+
+```rust
+/// Thread-safe wrapper for the emulator.
+/// All FFI calls go through this mutex to prevent data races between
+/// the UI thread (key events) and emulation thread (run_cycles).
+/// This is an opaque type from C's perspective (used via void*).
+pub struct SyncEmu {
+    inner: Mutex<Emu>,
+}
+```
+
+The emulator uses a mutex internally to ensure thread-safe access. Apps can safely call functions from multiple threads (e.g., UI thread for key input, background thread for emulation).
+
+<Note>
+  The framebuffer pointer returned by `emu_framebuffer()` is only valid while the mutex is held. Apps should copy the framebuffer data immediately after calling this function.
+</Note>
+
+## Integration with Apps
+
+Each platform integrates the emulator core differently:
+
+### Android (JNI)
+
+The Android app uses JNI to call Rust functions:
+
+1. **Rust core** compiled to `libemu_core.so` for each ABI (arm64-v8a, armeabi-v7a, x86_64, x86)
+2. **Kotlin code** loads the library via `System.loadLibrary("emu_core")`
+3. **JNI wrapper** declares `external` functions matching the C API
+4. **Native thread** runs emulation loop, calling `emu_run_cycles()` at ~60 FPS
+5. **Framebuffer** copied to Android `Bitmap` for display
+
+### iOS (Swift)
+
+The iOS app links against a static library:
+
+1. **Rust core** compiled to `libemu_core.a` for target architecture
+2. **Bridging header** exposes C API to Swift
+3. **Swift code** calls C functions directly (e.g., `emu_create()`, `emu_run_cycles()`)
+4. **Dispatch queue** runs emulation on background thread
+5. **Framebuffer** converted to `CGImage` for SwiftUI display
+
+### Web (WASM)
+
+The web app uses WebAssembly:
+
+1. **Rust core** compiled to `emu_core.wasm` with wasm-bindgen
+2. **JavaScript glue** generated by wasm-pack
+3. **React components** call WASM functions via imported module
+4. **Web Worker** runs emulation loop to avoid blocking UI
+5. **Framebuffer** copied to `ImageData` for canvas rendering
+
+## Emulation Loop
+
+All apps follow a similar emulation loop pattern:
+
+<Steps>
+  <Step title="Initialize">
+    Create emulator instance with `emu_create()` and load ROM with `emu_load_rom()`.
+  </Step>
+
+  <Step title="Power on">
+    Call `emu_power_on()` to simulate pressing the ON button and boot TI-OS.
+  </Step>
+
+  <Step title="Run cycles">
+    In a loop (typically 60 FPS):
+    
+    ```c
+    // Run ~800,000 cycles per frame (48MHz CPU / 60 FPS)
+    int cycles_per_frame = 48000000 / 60;
+    emu_run_cycles(emu, cycles_per_frame);
+    ```
+  </Step>
+
+  <Step title="Render frame">
+    Get the framebuffer and display it:
+    
+    ```c
+    int width, height;
+    const uint32_t* pixels = emu_framebuffer(emu, &width, &height);
+    // Copy pixels to platform-specific display (Bitmap, CGImage, Canvas)
+    ```
+  </Step>
+
+  <Step title="Handle input">
+    When user presses/releases a key:
+    
+    ```c
+    emu_set_key(emu, row, col, 1);  // Key down
+    // ... later ...
+    emu_set_key(emu, row, col, 0);  // Key up
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  The cycle count per frame can be adjusted to run the emulator faster or slower than real hardware. Typical values:
+  
+  - **800,000 cycles/frame** - Real hardware speed (48MHz / 60 FPS)
+  - **1,600,000 cycles/frame** - 2x speed (useful for slow calculations)
+  - **400,000 cycles/frame** - 0.5x speed (debugging)
+</Tip>
+
+## Build System
+
+The project uses a unified build system with platform-specific scripts.
+
+### Build Script
+
+From `README.md:90-122`:
+
+```bash
+./scripts/build.sh <platform> [options]
+```
+
+**Platforms:** `android`, `ios`
+
+**Options:**
+- `--release` - Release build (default)
+- `--debug` - Debug build
+- `--cemu` - Use CEmu backend instead of Rust
+- `--install` - Android: Install APK after build
+- `--sim` - iOS: Build for Simulator
+- `--all-abis` - Android: Build all ABIs (default: arm64 only)
+
+### Makefile Targets
+
+From `Makefile:7-149`, common targets:
+
+```makefile
+# Android
+make android              # Release, arm64, Rust
+make android-debug        # Debug, arm64, Rust
+make android-install      # Release + install
+make android-cemu         # Release with CEmu backend
+
+# iOS
+make ios                  # Release, device, Rust
+make ios-sim              # Release, simulator, Rust
+make ios-cemu             # Release, device, CEmu
+
+# Web
+make web                  # Build WASM + web app
+make web-dev              # Start dev server
+make web-cemu             # Build with CEmu WASM
+
+# Utilities
+make test                 # Run Rust tests
+make clean                # Clean all artifacts
+```
+
+## What the Emulator Does
+
+From `README.md:67-77`, the emulator recreates TI-84 Plus CE hardware:
+
+1. **Loads ROM** - The calculator's operating system (you provide this)
+2. **Executes CPU** - Runs eZ80 instructions at ~48MHz emulated speed
+3. **Renders Display** - 320x240 16-bit color LCD at 60 FPS
+4. **Handles Input** - 8x7 key matrix matching physical calculator
+5. **Emulates Peripherals** - Timers, real-time clock, interrupts, etc.
+
+The apps provide the UI (screen display, keypad, menus) while the backend handles all emulation logic.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="API Reference" icon="code" href="/api">
+    Detailed documentation of the C API and Rust internals
+  </Card>
+  
+  <Card title="Development" icon="wrench" href="/development">
+    Development workflows, debugging tools, and contributing guidelines
+  </Card>
+  
+  <Card title="Peripherals" icon="microchip" href="/peripherals">
+    Deep dive into LCD, keypad, timers, and other hardware
+  </Card>
+  
+  <Card title="Testing" icon="flask" href="/testing">
+    Testing strategies, parity testing with CEmu, and trace comparison
+  </Card>
+</CardGroup>

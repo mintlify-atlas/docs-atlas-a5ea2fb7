@@ -1,0 +1,286 @@
+---
+title: Debugging Tools
+description: Debug tools for testing, tracing, and diagnosing emulator behavior
+---
+
+The emulator includes a consolidated debug tool for testing, tracing, and diagnostics.
+
+## Quick Commands
+
+Run these from the `core/` directory:
+
+```bash
+cd core
+cargo run --release --example debug -- boot      # Run boot test with progress reporting
+cargo run --release --example debug -- screen    # Render screen to PNG after boot
+cargo run --release --example debug -- vram      # Analyze VRAM colors
+cargo run --release --example debug -- trace     # Generate trace log (100k steps)
+cargo run --release --example debug -- help      # Show debug tool help
+```
+
+For convenience, these are often abbreviated in development docs as:
+- `cargo boot` → `cargo run --release --example debug -- boot`
+- `cargo screen` → `cargo run --release --example debug -- screen`
+- `cargo trace` → `cargo run --release --example debug -- trace`
+
+## Debug Commands
+
+### boot
+
+Run boot test with progress reporting. Shows boot progress, detects polling loops, and analyzes final state.
+
+```bash
+cargo run --release --example debug -- boot
+```
+
+Output:
+- Initial CPU state
+- Progress updates every 10M cycles
+- Detection of TI-OS idle loop at PC 085B7D-085B80
+- Final state: registers, LCD status, screen analysis
+- Execution history
+
+### trace
+
+Generate trace log for parity comparison with CEmu. Default: 100,000 steps.
+
+```bash
+# Generate 100k step trace (default)
+cargo run --release --example debug -- trace
+
+# Generate 1M step trace
+cargo run --release --example debug -- trace 1000000
+```
+
+Output format (space-separated):
+```
+step cycles PC SP AF BC DE HL IX IY ADL IFF1 IFF2 IM HALT opcode
+```
+
+Traces are saved to `../traces/ours_<timestamp>.log`
+
+### screen
+
+Render screen to image file after boot. Default output: `screen.png`
+
+```bash
+# Save as screen.png
+cargo run --release --example debug -- screen
+
+# Save with custom filename
+cargo run --release --example debug -- screen boot.png
+```
+
+Generates PPM format, optionally converts to PNG using `sips` (macOS).
+
+### vram
+
+Analyze VRAM content after boot. Shows color histogram and pixel statistics.
+
+```bash
+cargo run --release --example debug -- vram
+```
+
+Output:
+- LCD state (control register, VRAM base)
+- TI-OS display state (cursor position, MathPrint flags)
+- LCD timing parameters
+- Color histogram
+
+### compare
+
+Compare our trace with CEmu trace file. Reports first divergence point and statistics.
+
+```bash
+cargo run --release --example debug -- compare ../traces/cemu.log
+```
+
+## Trace Comparison with CEmu
+
+For detailed parity testing:
+
+### Step 1: Generate CEmu Trace
+
+```bash
+cd tools/cemu-test
+./trace_gen ../../TI-84\ CE.rom -n 10000 -o cemu_trace.txt
+```
+
+The `trace_gen` tool generates CPU instruction traces from CEmu:
+
+```bash
+./trace_gen <rom_file> [-n steps] [-o output_file]
+```
+
+**Options:**
+- `-n steps` - Number of steps to trace (default: 1,000,000)
+- `-o file` - Output file (default: stdout)
+
+**Output format:**
+```
+step cycles PC SP AF BC DE HL IX IY ADL IFF1 IFF2 IM HALT opcode
+```
+
+### Step 2: Generate Rust Trace
+
+```bash
+cd ../../core
+cargo run --release --example debug -- trace 10000 > rust_trace.txt
+```
+
+### Step 3: Compare
+
+```bash
+# Manual diff
+diff ../tools/cemu-test/cemu_trace.txt rust_trace.txt | head -50
+
+# Or use built-in compare command
+cargo run --release --example debug -- compare ../tools/cemu-test/cemu_trace.txt
+```
+
+The compare command reports:
+- First divergence point
+- Register differences (PC, SP, AF, BC, DE, HL, IX, IY)
+- Flag differences (ADL, IFF1, IFF2, IM)
+- Cycle count differences
+
+## Full Trace with I/O Operations
+
+For comprehensive debugging with I/O operation tracking:
+
+### fulltrace
+
+Generate comprehensive trace with I/O operations in JSON format.
+
+```bash
+# Generate 1000 step full trace (default)
+cargo run --release --example debug -- fulltrace
+
+# Generate custom length trace
+cargo run --release --example debug -- fulltrace 10000
+```
+
+Output: JSON with full instruction and I/O details, saved to `../traces/fulltrace_<timestamp>.json`
+
+**JSON format:**
+```json
+{
+  "step": 0,
+  "cycle": 0,
+  "pc": "0x000000",
+  "opcode": {"bytes": "F3", "mnemonic": "DI"},
+  "regs_before": {"A": "0x00", "F": "0x00", "BC": "0x000000", ...},
+  "io_ops": [
+    {"type": "write", "target": "ram", "addr": "0xD00000", "new": "0xFF"}
+  ],
+  "cycles": 3
+}
+```
+
+### fullcompare
+
+Compare two JSON trace files and report divergence.
+
+```bash
+cargo run --release --example debug -- fullcompare <ours.json> <cemu.json>
+```
+
+Reports:
+- First difference in PC, registers, or I/O ops
+- Cycle differences
+- I/O operation count mismatches
+- Detailed divergence analysis
+
+## Advanced Debugging
+
+### disasm
+
+Disassemble instructions at a specific address.
+
+```bash
+# Disassemble at address 0x2050C (default), 40 instructions
+cargo run --release --example debug -- disasm
+
+# Disassemble at custom address
+cargo run --release --example debug -- disasm 0x085B80 20
+```
+
+### ports
+
+Dump control port values after boot. Useful for comparing with CEmu.
+
+```bash
+cargo run --release --example debug -- ports
+```
+
+### mathprint
+
+Trace writes to MathPrint flag (0xD000C4) during boot.
+
+```bash
+cargo run --release --example debug -- mathprint
+```
+
+### watchpoint
+
+Single-step boot and capture PC when 0xD000C4 is written.
+
+```bash
+cargo run --release --example debug -- watchpoint
+```
+
+## Environment Variables
+
+### DUMP_STEP
+
+Dump memory at specific step during trace:
+
+```bash
+DUMP_STEP=1000 DUMP_ADDR=0xD00000 DUMP_LEN=256 cargo run --release --example debug -- trace
+```
+
+**Variables:**
+- `DUMP_STEP=N` - Step number to dump
+- `DUMP_ADDR=0xNNN` - Address to dump (hex)
+- `DUMP_LEN=N` - Number of bytes to dump
+
+### SERIAL_FLASH
+
+Use serial flash instead of parallel flash:
+
+```bash
+SERIAL_FLASH=1 cargo run --release --example debug -- boot
+```
+
+## Development Workflow
+
+Recommended workflow for debugging changes:
+
+1. **After every change**, verify boot still works:
+   ```bash
+   cargo run --release --example debug -- boot
+   ```
+
+2. **Generate trace** to check for regressions:
+   ```bash
+   cargo run --release --example debug -- trace 100000
+   ```
+
+3. **Compare with CEmu** if divergence is suspected:
+   ```bash
+   # Generate CEmu reference trace
+   cd tools/cemu-test
+   ./trace_gen ../../TI-84\ CE.rom -n 100000 -o cemu_trace.txt
+   
+   # Compare
+   cd ../../core
+   cargo run --release --example debug -- compare ../tools/cemu-test/cemu_trace.txt
+   ```
+
+4. **Investigate immediately** if divergence is found before continuing other work.
+
+## See Also
+
+- [Testing](/advanced/testing) - Running unit tests and parity checks
+- [CEmu Parity](/advanced/cemu-parity) - CEmu setup and parity verification
+- [ROM Loading](/advanced/rom-loading) - Loading programs into the emulator

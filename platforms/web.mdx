@@ -1,0 +1,798 @@
+---
+title: 'Web Integration'
+description: 'Integrate the TI-84 Plus CE emulator into web applications using WebAssembly'
+---
+
+## Overview
+
+The web version runs entirely in the browser using WebAssembly (WASM). The Rust core compiles to `emu_core.wasm` (~96KB gzipped) and provides a JavaScript interface via wasm-bindgen.
+
+## Architecture
+
+```
+┌─────────────────────────────────────┐
+│   Web App (React/TypeScript)        │
+│   - Calculator.tsx                  │
+│   - RustBackend.ts                  │
+├─────────────────────────────────────┤
+│   WASM Bindings (wasm-bindgen)      │
+│   - emu_core.js                     │
+│   - emu_core.d.ts                   │
+├─────────────────────────────────────┤
+│   Emulator Core (WASM)              │
+│   - emu_core.wasm (Rust)            │
+│   - cemu.wasm (CEmu, optional)      │
+└─────────────────────────────────────┘
+```
+
+The WASM module runs in a Web Worker for non-blocking execution, with the main thread handling UI rendering.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Install Node.js">
+    Download and install [Node.js 18+](https://nodejs.org/)
+  </Step>
+  
+  <Step title="Install Rust">
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ```
+  </Step>
+  
+  <Step title="Add WASM target">
+    ```bash
+    rustup target add wasm32-unknown-unknown
+    ```
+  </Step>
+  
+  <Step title="Install wasm-pack">
+    ```bash
+    cargo install wasm-pack
+    ```
+  </Step>
+</Steps>
+
+## Building
+
+### Development Mode (with Hot Reload)
+
+```bash
+# Build WASM + start dev server
+make web-dev
+
+# Or manually:
+cd core
+wasm-pack build --target web --out-dir ../web/src/emu-core
+cd ../web
+npm install
+npm run dev
+```
+
+The dev server runs at `http://localhost:5173` with hot module replacement.
+
+### Production Build
+
+```bash
+# Build optimized bundle
+make web
+
+# Or manually:
+cd core
+wasm-pack build --target web --release --out-dir ../web/src/emu-core
+cd ../web
+npm run build
+# Output in web/dist/
+```
+
+<Info>
+  The production build is optimized with `wasm-opt` and gzips to ~96KB.
+</Info>
+
+### Building with CEmu Backend
+
+```bash
+make web-cemu
+```
+
+This compiles CEmu to WASM using Emscripten and creates a `cemu.wasm` module.
+
+## Integration Guide
+
+### Step 1: Create Backend Instance
+
+The `RustBackend` class wraps the WASM module:
+
+```typescript RustBackend.ts
+import { RustBackend } from './emulator/RustBackend';
+
+const backend = new RustBackend();
+
+// Initialize WASM module
+await backend.init();
+
+console.log('Backend initialized:', backend.name);  // "Rust (Custom)"
+```
+
+### Step 2: Load ROM and Start Emulation
+
+```typescript Loading ROM
+// Load ROM from File
+const handleFileLoad = async (file: File) => {
+    const buffer = await file.arrayBuffer();
+    const romData = new Uint8Array(buffer);
+    
+    // Load into emulator
+    const result = await backend.loadRom(romData);
+    
+    if (result === 0) {
+        console.log('ROM loaded successfully');
+        
+        // Power on (simulate ON key press)
+        backend.setKey(2, 0, true);  // ON key down
+        setTimeout(() => backend.setKey(2, 0, false), 100);  // ON key up
+        
+        setRomLoaded(true);
+        setIsRunning(true);
+    } else {
+        console.error('Failed to load ROM:', result);
+    }
+};
+```
+
+### Step 3: Run the Emulation Loop
+
+Use `requestAnimationFrame` for smooth rendering:
+
+```typescript Emulation Loop
+const [isRunning, setIsRunning] = useState(false);
+const animationRef = useRef<number>(0);
+const backendRef = useRef<RustBackend | null>(null);
+
+useEffect(() => {
+    if (!isRunning || !backendRef.current) return;
+    
+    let lastTime = 0;
+    let timeAccumulator = 0;
+    const TARGET_FRAME_MS = 1000 / 60;  // 16.67ms per frame
+    
+    const loop = (timestamp: number) => {
+        const backend = backendRef.current;
+        if (!backend) return;
+        
+        // Accumulate time
+        if (lastTime > 0) {
+            const delta = timestamp - lastTime;
+            timeAccumulator += delta;
+        }
+        lastTime = timestamp;
+        
+        // Run emulated frames
+        while (timeAccumulator >= TARGET_FRAME_MS) {
+            backend.runFrame();  // Runs 800,000 cycles
+            timeAccumulator -= TARGET_FRAME_MS;
+        }
+        
+        // Render
+        renderFrame();
+        
+        animationRef.current = requestAnimationFrame(loop);
+    };
+    
+    animationRef.current = requestAnimationFrame(loop);
+    
+    return () => {
+        if (animationRef.current) {
+            cancelAnimationFrame(animationRef.current);
+        }
+    };
+}, [isRunning]);
+```
+
+### Step 4: Render the Display
+
+Draw the framebuffer to a canvas:
+
+```typescript Rendering
+const canvasRef = useRef<HTMLCanvasElement>(null);
+
+const renderFrame = () => {
+    const backend = backendRef.current;
+    const canvas = canvasRef.current;
+    if (!backend || !canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    const width = backend.getFramebufferWidth();   // 320
+    const height = backend.getFramebufferHeight(); // 240
+    
+    // Show black screen when LCD is off
+    if (!backend.isLcdOn()) {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, width, height);
+        return;
+    }
+    
+    // Get framebuffer as RGBA
+    const rgba = backend.getFramebufferRGBA();
+    
+    // Create ImageData and draw
+    const clampedData = new Uint8ClampedArray(rgba);
+    const imageData = new ImageData(clampedData, width, height);
+    ctx.putImageData(imageData, 0, 0);
+};
+
+// In your JSX:
+<canvas
+    ref={canvasRef}
+    width={320}
+    height={240}
+    style={{
+        imageRendering: 'pixelated',  // Nearest-neighbor for sharp pixels
+        width: '100%',
+        height: 'auto'
+    }}
+/>
+```
+
+### Step 5: Handle Keyboard Input
+
+Map keyboard keys to the TI-84 Plus CE key matrix:
+
+```typescript Key Input
+const KEY_MAP: Record<string, [number, number]> = {
+    // Numbers
+    '0': [3, 0], '1': [3, 1], '2': [4, 1], '3': [5, 1],
+    '4': [3, 2], '5': [4, 2], '6': [5, 2],
+    '7': [3, 3], '8': [4, 3], '9': [5, 3],
+    
+    // Math
+    '+': [6, 1], '-': [6, 2], '*': [6, 3], '/': [6, 4],
+    '^': [6, 5], '(': [4, 4], ')': [5, 4], '.': [4, 0],
+    
+    // Control
+    'Enter': [6, 0],        // ENTER
+    'Backspace': [1, 7],    // DEL
+    'Escape': [6, 6],       // CLEAR
+    'o': [2, 0], 'O': [2, 0],  // ON
+    
+    // Arrows
+    'ArrowUp': [7, 3],
+    'ArrowDown': [7, 0],
+    'ArrowLeft': [7, 1],
+    'ArrowRight': [7, 2],
+    
+    // Function keys
+    'F1': [1, 4],  // Y=
+    'F2': [1, 3],  // Window
+    'F3': [1, 2],  // Zoom
+    'F4': [1, 1],  // Trace
+    'F5': [1, 0],  // Graph
+};
+
+useEffect(() => {
+    const backend = backendRef.current;
+    if (!backend) return;
+    
+    const handleKeyDown = (e: KeyboardEvent) => {
+        // Toggle pause with Space
+        if (e.key === ' ') {
+            e.preventDefault();
+            setIsRunning(prev => !prev);
+            return;
+        }
+        
+        const mapping = KEY_MAP[e.key];
+        if (mapping) {
+            e.preventDefault();
+            backend.setKey(mapping[0], mapping[1], true);
+        }
+    };
+    
+    const handleKeyUp = (e: KeyboardEvent) => {
+        const mapping = KEY_MAP[e.key];
+        if (mapping) {
+            e.preventDefault();
+            backend.setKey(mapping[0], mapping[1], false);
+        }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    
+    return () => {
+        window.removeEventListener('keydown', handleKeyDown);
+        window.removeEventListener('keyup', handleKeyUp);
+    };
+}, []);
+```
+
+<Accordion title="Full Keyboard Controls">
+  From `source/web/src/Calculator.tsx:26`:
+  
+  | Key | Function |
+  |-----|----------|
+  | 0-9 | Number keys |
+  | + - * / | Math operations |
+  | ( ) | Parentheses |
+  | ^ | Power |
+  | . | Decimal |
+  | , | Comma |
+  | _ | Negate (-) |
+  | Enter | Enter |
+  | Backspace/Delete | Del |
+  | Arrow keys | Navigation |
+  | Escape | Clear |
+  | Shift | 2nd |
+  | Alt | Alpha |
+  | O | ON |
+  | Space | Pause/Resume |
+  | V | √ (square root) |
+  | S/C/T | Sin/Cos/Tan |
+  | L/G | Ln/Log |
+  | M | Math |
+  | R | x⁻¹ |
+  | X | X,T,θ,n |
+  | Insert | Sto |
+  | F1-F5 | Y=/Window/Zoom/Trace/Graph |
+  | Home | Apps |
+  | P | Prgm |
+  | PageDown | Prgm |
+  | PageUp | Vars |
+  | End | Stat |
+</Accordion>
+
+### Step 6: State Persistence
+
+Save and restore emulator state using IndexedDB:
+
+```typescript State Management
+import { getStateStorage } from './storage/StateStorage';
+
+const storage = await getStateStorage();
+const romHash = await storage.getRomHash(romData);
+
+// Save state
+const saveState = async () => {
+    const backend = backendRef.current;
+    if (!backend || !romHash) return;
+    
+    const stateData = backend.saveState();
+    if (stateData) {
+        await storage.saveState(romHash, stateData, 'rust');
+        console.log('State saved:', stateData.length, 'bytes');
+    }
+};
+
+// Load state
+const loadState = async () => {
+    const backend = backendRef.current;
+    if (!backend || !romHash) return;
+    
+    const stateData = await storage.loadState(romHash, 'rust');
+    if (stateData && backend.loadState(stateData)) {
+        console.log('State restored');
+    }
+};
+
+// Auto-save on visibility change and page unload
+useEffect(() => {
+    const handleVisibilityChange = () => {
+        if (document.visibilityState === 'hidden') {
+            saveState();
+        }
+    };
+    
+    const handleBeforeUnload = () => {
+        saveState();
+    };
+    
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    
+    return () => {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+        window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+}, []);
+```
+
+### Step 7: Loading Program Files
+
+Inject `.8xp` (programs) or `.8xv` (app variables) into the calculator's flash:
+
+```typescript Program Loading
+// Load ROM first
+await backend.loadRom(romData);
+
+// Inject program files BEFORE powering on
+const handleProgramLoad = async (files: FileList) => {
+    for (const file of Array.from(files)) {
+        const buffer = await file.arrayBuffer();
+        const programData = new Uint8Array(buffer);
+        
+        const count = backend.sendFile(programData);
+        
+        if (count >= 0) {
+            console.log(`Injected ${file.name}: ${count} entries`);
+        } else {
+            console.error(`Failed to inject ${file.name}: error ${count}`);
+        }
+    }
+    
+    // Power on - programs will appear in PRGM menu
+    backend.powerOn();
+};
+```
+
+## Drag and Drop Support
+
+Implement drag-and-drop for ROM and program files:
+
+```typescript Drag and Drop
+const [isDragging, setIsDragging] = useState(false);
+
+const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    
+    const files = Array.from(e.dataTransfer.files);
+    const romFiles = files.filter(f => f.name.endsWith('.rom') || f.name.endsWith('.bin'));
+    const programFiles = files.filter(f => f.name.endsWith('.8xp') || f.name.endsWith('.8xv'));
+    
+    // Load ROM first if present
+    if (romFiles.length > 0) {
+        await handleRomLoad(romFiles[0]);
+    }
+    
+    // Then inject program files
+    if (programFiles.length > 0) {
+        await handleProgramLoad(programFiles);
+    }
+};
+
+// In your JSX:
+<div
+    onDragEnter={(e) => { e.preventDefault(); setIsDragging(true); }}
+    onDragLeave={(e) => { e.preventDefault(); setIsDragging(false); }}
+    onDragOver={(e) => e.preventDefault()}
+    onDrop={handleDrop}
+>
+    {/* Calculator UI */}
+    {isDragging && (
+        <div style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(59, 130, 246, 0.15)',
+            border: '3px dashed rgba(59, 130, 246, 0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 100
+        }}>
+            <span>Drop .rom, .8xp, or .8xv files</span>
+        </div>
+    )}
+</div>
+```
+
+## Backend Switching
+
+Switch between Rust and CEmu backends at runtime:
+
+```typescript Backend Switching
+import { createBackend, type BackendType } from './emulator';
+
+const [backendType, setBackendType] = useState<BackendType>('rust');
+
+const switchBackend = async (newBackend: BackendType) => {
+    // Destroy current backend
+    if (backendRef.current) {
+        backendRef.current.destroy();
+    }
+    
+    // Create new backend
+    const backend = createBackend(newBackend);
+    await backend.init();
+    backendRef.current = backend;
+    
+    // Reload ROM
+    if (romDataRef.current) {
+        await backend.loadRom(romDataRef.current);
+    }
+    
+    setBackendType(newBackend);
+};
+```
+
+## WASM API
+
+The WASM module is generated by wasm-bindgen and provides a JavaScript interface:
+
+### WasmEmu Class
+
+```typescript emu_core.d.ts
+export class WasmEmu {
+    free(): void;
+    
+    // ROM loading
+    load_rom(data: Uint8Array): number;
+    send_file(data: Uint8Array): number;
+    send_file_live(data: Uint8Array): number;
+    
+    // Execution
+    reset(): void;
+    power_on(): void;
+    run_cycles(cycles: number): number;
+    
+    // Display
+    framebuffer_width(): number;
+    framebuffer_height(): number;
+    get_framebuffer_rgba(): Uint8Array;
+    is_lcd_on(): boolean;
+    
+    // Input
+    set_key(row: number, col: number, down: boolean): void;
+}
+```
+
+### Initialization
+
+```typescript WASM Init
+import init, { WasmEmu } from '../emu-core/emu_core';
+
+// Initialize WASM module (loads .wasm file)
+await init();
+
+// Create emulator instance
+const emu = new WasmEmu();
+
+// Use the emulator
+emu.load_rom(romData);
+emu.power_on();
+emu.run_cycles(800_000);
+
+// Clean up
+emu.free();
+```
+
+## Performance Optimization
+
+### Cycle Budget
+
+Adjust the cycle count based on your performance needs:
+
+```typescript Performance Tuning
+// Real-time (1x speed, 48MHz at 60 FPS)
+const CYCLES_PER_FRAME = 800_000;
+
+// With speed multiplier
+const speed = 2.0;  // 2x speed
+const cyclesPerFrame = Math.floor(800_000 * speed);
+```
+
+### Frame Skipping
+
+Skip rendering during fast emulation:
+
+```typescript Frame Skipping
+let framesSinceRender = 0;
+const RENDER_EVERY_N_FRAMES = 4;
+
+while (timeAccumulator >= TARGET_FRAME_MS) {
+    backend.runFrame();
+    timeAccumulator -= TARGET_FRAME_MS;
+    framesSinceRender++;
+    
+    // Only render every Nth frame during high-speed emulation
+    if (framesSinceRender >= RENDER_EVERY_N_FRAMES) {
+        renderFrame();
+        framesSinceRender = 0;
+    }
+}
+```
+
+### WASM Memory Management
+
+The WASM module uses a linear memory buffer that can grow:
+
+```typescript Memory Management
+// State snapshot includes WASM memory
+const saveState = (): Uint8Array | null => {
+    const memBuffer = wasmMemory.buffer;
+    const memSize = memBuffer.byteLength;
+    
+    // Serialize WASM memory + emulator pointer
+    const snapshot = new Uint8Array(12 + memSize);
+    const view = new DataView(snapshot.buffer);
+    view.setUint32(0, SNAPSHOT_MAGIC, false);
+    view.setUint32(4, emuPtr, true);
+    view.setUint32(8, memSize, true);
+    snapshot.set(new Uint8Array(memBuffer), 12);
+    
+    return snapshot;
+};
+```
+
+## Example App
+
+The reference implementation is available at `source/web/`:
+
+- **Calculator.tsx** - Main React component with emulation loop
+- **RustBackend.ts** - WASM backend wrapper
+- **StateStorage.ts** - IndexedDB persistence
+- **Keypad.tsx** - On-screen keypad component
+
+## API Reference
+
+### RustBackend Class
+
+<ParamField path="init()" type="Promise<void>">
+  Initialize the WASM module. Must be called before any other operations.
+</ParamField>
+
+<ParamField path="destroy()" type="void">
+  Destroy the emulator instance and free WASM resources.
+</ParamField>
+
+<ParamField path="loadRom(data: Uint8Array)" type="Promise<number>">
+  Load ROM data into the emulator.
+  
+  **Parameters:**
+  - `data`: ROM file contents (typically 4MB for TI-84 Plus CE)
+  
+  **Returns:** `0` on success, negative error code on failure
+</ParamField>
+
+<ParamField path="sendFile(data: Uint8Array)" type="number">
+  Inject a `.8xp` or `.8xv` file into flash (cold boot). Must be called after `loadRom()` and before `powerOn()`.
+  
+  **Parameters:**
+  - `data`: Program or AppVar file contents
+  
+  **Returns:** Number of entries injected (≥0), or negative error code
+</ParamField>
+
+<ParamField path="sendFileLive(data: Uint8Array)" type="number">
+  Inject a file into a running emulator (hot reload). Performs a soft reboot.
+  
+  **Parameters:**
+  - `data`: Program or AppVar file contents
+  
+  **Returns:** Number of entries injected (≥0), or negative error code
+</ParamField>
+
+<ParamField path="powerOn()" type="void">
+  Simulate ON key press+release to start execution. Call after `loadRom()`.
+</ParamField>
+
+<ParamField path="reset()" type="void">
+  Reset the emulator to initial state (cold boot).
+</ParamField>
+
+<ParamField path="runCycles(cycles: number)" type="number">
+  Run emulation for the specified number of CPU cycles.
+  
+  **Parameters:**
+  - `cycles`: Number of cycles to execute
+  
+  **Returns:** Number of cycles actually executed
+</ParamField>
+
+<ParamField path="runFrame()" type="void">
+  Run one frame of emulation (800,000 cycles at 48MHz/60FPS).
+</ParamField>
+
+<ParamField path="getFramebufferWidth()" type="number">
+  Get the framebuffer width (320).
+</ParamField>
+
+<ParamField path="getFramebufferHeight()" type="number">
+  Get the framebuffer height (240).
+</ParamField>
+
+<ParamField path="getFramebufferRGBA()" type="Uint8Array">
+  Get the framebuffer as RGBA8888 pixels (320×240×4 = 307,200 bytes).
+  
+  **Returns:** Uint8Array with RGBA pixel data
+</ParamField>
+
+<ParamField path="setKey(row: number, col: number, down: boolean)" type="void">
+  Set key state in the 8×7 key matrix.
+  
+  **Parameters:**
+  - `row`: Key row (0-7)
+  - `col`: Key column (0-7)
+  - `down`: `true` if pressed, `false` if released
+</ParamField>
+
+<ParamField path="isLcdOn()" type="boolean">
+  Check if the LCD is on (should display content).
+  
+  **Returns:** `true` if LCD is active, `false` if off or sleeping
+</ParamField>
+
+<ParamField path="saveState()" type="Uint8Array | null">
+  Save the current emulator state (includes WASM memory snapshot).
+  
+  **Returns:** State data, or null on failure
+</ParamField>
+
+<ParamField path="loadState(data: Uint8Array)" type="boolean">
+  Load a saved emulator state.
+  
+  **Parameters:**
+  - `data`: Previously saved state data
+  
+  **Returns:** `true` on success, `false` on failure
+</ParamField>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="WASM module fails to load">
+    Ensure the WASM file is being served with the correct MIME type:
+    ```
+    Content-Type: application/wasm
+    ```
+    
+    For Vite, this is handled automatically. For other servers, configure MIME types:
+    ```nginx nginx.conf
+    types {
+        application/wasm wasm;
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Memory grows unbounded">
+    Call `destroy()` when unmounting the component to free WASM resources:
+    ```typescript
+    useEffect(() => {
+        return () => {
+            backendRef.current?.destroy();
+        };
+    }, []);
+    ```
+  </Accordion>
+  
+  <Accordion title="Emulator runs slowly">
+    - Check browser console for slow frame warnings
+    - Reduce cycle count: try 400,000 cycles per frame
+    - Enable WASM SIMD in your browser flags (Chrome/Edge)
+    - Profile with Chrome DevTools Performance tab
+  </Accordion>
+  
+  <Accordion title="State persistence fails">
+    Check that IndexedDB is available:
+    ```typescript
+    if (!window.indexedDB) {
+        console.error('IndexedDB not supported');
+    }
+    ```
+    
+    Clear stale data:
+    ```typescript
+    await storage.clearAllStates();
+    ```
+  </Accordion>
+  
+  <Accordion title="Screen stays black after loading ROM">
+    Call `powerOn()` after loading the ROM:
+    ```typescript
+    await backend.loadRom(romData);
+    backend.powerOn();  // Don't forget this!
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Android Integration" icon="android" href="/platforms/android">
+    Learn how to integrate the emulator into Android apps with Kotlin
+  </Card>
+  <Card title="iOS Integration" icon="apple" href="/platforms/ios">
+    Build an iOS version with Swift and SwiftUI
+  </Card>
+</CardGroup>

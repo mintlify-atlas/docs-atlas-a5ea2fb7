@@ -1,0 +1,173 @@
+---
+title: Prerequisites
+description: Required tools and dependencies for building the TI-84 Plus CE emulator
+---
+
+Before building the emulator, you need to install the required toolchains and dependencies for your target platform.
+
+## Core Requirements
+
+### Rust Toolchain
+
+The emulator core is written in Rust. Install the latest stable Rust toolchain:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+After installation, verify:
+
+```bash
+rustc --version
+cargo --version
+```
+
+## Platform-Specific Requirements
+
+### Android
+
+**Android Studio with NDK**
+
+1. Download and install [Android Studio](https://developer.android.com/studio)
+2. Open Android Studio and navigate to **Tools → SDK Manager**
+3. Under **SDK Tools**, install:
+   - Android NDK (Side by side)
+   - Android SDK (API 24+)
+   - CMake
+
+**Rust Android Targets**
+
+Install the Android cross-compilation targets:
+
+```bash
+rustup target add aarch64-linux-android    # ARM64 (most devices)
+rustup target add armv7-linux-androideabi  # ARM32 (older devices)
+rustup target add x86_64-linux-android     # x86_64 emulator
+rustup target add i686-linux-android       # x86 emulator
+```
+
+**Environment Variables**
+
+The build script automatically detects the Android NDK location from `$ANDROID_HOME` or `$ANDROID_NDK_HOME`. If detection fails, set:
+
+```bash
+export ANDROID_HOME=~/Library/Android/sdk  # macOS
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/<version>
+```
+
+### iOS
+
+**Xcode**
+
+Requires Xcode 15+ on macOS:
+
+```bash
+xcode-select --install
+```
+
+Verify installation:
+
+```bash
+xcodebuild -version
+```
+
+**Rust iOS Targets**
+
+Install the iOS cross-compilation targets:
+
+```bash
+rustup target add aarch64-apple-ios        # iOS device (ARM64)
+rustup target add aarch64-apple-ios-sim    # iOS Simulator (Apple Silicon)
+rustup target add x86_64-apple-ios         # iOS Simulator (Intel)
+```
+
+### Web
+
+**Node.js**
+
+Requires Node.js 18 or later:
+
+```bash
+# macOS (Homebrew)
+brew install node
+
+# Linux (NodeSource)
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+Verify installation:
+
+```bash
+node --version
+npm --version
+```
+
+**wasm-pack**
+
+Install wasm-pack for building WebAssembly:
+
+```bash
+cargo install wasm-pack
+```
+
+**WASM Target**
+
+Install the WebAssembly target:
+
+```bash
+rustup target add wasm32-unknown-unknown
+```
+
+## Optional: CEmu Backend
+
+The emulator can optionally be built with [CEmu](https://github.com/CE-Programming/CEmu) as an alternative backend for parity testing.
+
+**Clone CEmu**
+
+```bash
+git clone https://github.com/CE-Programming/CEmu.git cemu-ref
+```
+
+**Additional Requirements for Web CEmu**
+
+Building CEmu for web requires Emscripten:
+
+```bash
+# macOS
+brew install emscripten
+
+# Linux
+git clone https://github.com/emscripten-core/emsdk.git
+cd emsdk
+./emsdk install latest
+./emsdk activate latest
+source ./emsdk_env.sh
+```
+
+## Verification
+
+Verify all tools are installed correctly:
+
+```bash
+# Core tools
+rustc --version
+cargo --version
+
+# Android (if building for Android)
+rustup target list | grep android
+
+# iOS (if building for iOS)
+rustup target list | grep ios
+xcodebuild -version
+
+# Web (if building for web)
+node --version
+wasm-pack --version
+rustup target list | grep wasm32
+```
+
+## Next Steps
+
+- [Unified Build Script](/building/unified-build-script) - Learn how to use the main build script
+- [Platform-Specific Builds](/building/platform-specific) - Manual build instructions for each platform

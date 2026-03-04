@@ -1,0 +1,237 @@
+---
+title: Lifecycle Management
+description: Create, destroy, reset, and power on the emulator
+---
+
+The lifecycle functions manage the emulator instance from creation to destruction.
+
+## emu_create
+
+Create a new emulator instance.
+
+```c
+SyncEmu* emu_create(void);
+```
+
+### Returns
+
+- **Non-null pointer**: Successfully created emulator instance
+- **NULL**: Allocation failure (out of memory)
+
+### Description
+
+Allocates and initializes a new thread-safe emulator instance. The returned pointer is opaque and should only be used with other API functions. The emulator starts in a reset state with no ROM loaded.
+
+All operations on the returned pointer are thread-safe due to internal synchronization via mutex.
+
+### Example
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+SyncEmu* emu = emu_create();
+if (!emu) {
+    fprintf(stderr, "Failed to create emulator\n");
+    exit(1);
+}
+
+printf("Emulator created successfully\n");
+```
+
+### Notes
+
+- Always check for NULL return value
+- Must call `emu_destroy()` when done to prevent memory leaks
+- The instance starts with no ROM loaded - call `emu_load_rom()` before execution
+
+---
+
+## emu_destroy
+
+Destroy an emulator instance and free all resources.
+
+```c
+void emu_destroy(SyncEmu* emu);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance (may be NULL)
+
+### Description
+
+Frees all memory associated with the emulator instance, including internal buffers, framebuffer, and emulation state. Safe to call with a NULL pointer (no-op).
+
+After calling this function, the pointer is invalid and must not be used.
+
+### Example
+
+```c
+SyncEmu* emu = emu_create();
+
+// Use emulator...
+
+// Cleanup
+emu_destroy(emu);
+emu = NULL;  // Prevent use-after-free
+```
+
+### Notes
+
+- Safe to call with NULL pointer
+- Blocks if another thread holds the internal mutex (waits for completion)
+- All pointers obtained from the emulator (framebuffer, etc.) become invalid
+
+---
+
+## emu_reset
+
+Reset the emulator to initial state.
+
+```c
+void emu_reset(SyncEmu* emu);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+
+### Description
+
+Resets the emulator to its initial power-off state. This clears CPU registers, resets peripherals, and clears RAM, but preserves the loaded ROM.
+
+This is equivalent to removing the batteries from the calculator and reinserting them. To start execution after reset, call `emu_power_on()`.
+
+### Example
+
+```c
+// Reset calculator to clean state
+emu_reset(emu);
+
+// Power on to start fresh
+emu_power_on(emu);
+
+// Calculator boots from beginning
+emu_run_cycles(emu, 1000000);
+```
+
+### Notes
+
+- Safe to call with NULL pointer (no-op)
+- ROM remains loaded - no need to call `emu_load_rom()` again
+- RAM is cleared - any programs or data in RAM are lost
+- Must call `emu_power_on()` after reset to begin execution
+
+---
+
+## emu_power_on
+
+Power on the calculator by simulating ON key press and release.
+
+```c
+void emu_power_on(SyncEmu* emu);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+
+### Description
+
+Simulates pressing and releasing the ON key, which wakes the calculator from powered-off state and begins execution. Must be called after `emu_load_rom()` and before `emu_run_cycles()` to start the boot sequence.
+
+This triggers the boot process where the TI-OS initializes hardware, checks for OS updates, and eventually displays the home screen.
+
+### Example
+
+```c
+// Load ROM
+uint8_t* rom = load_file("TI-84-CE.rom", &size);
+emu_load_rom(emu, rom, size);
+
+// Power on to start boot
+emu_power_on(emu);
+
+// Run boot sequence
+for (int i = 0; i < 100; i++) {
+    emu_run_cycles(emu, 250000);  // ~1.67 seconds total
+    
+    // Check if boot is complete
+    if (is_home_screen_visible()) {
+        printf("Boot complete after %.2f seconds\n", i * 0.0167);
+        break;
+    }
+}
+```
+
+### Notes
+
+- Safe to call with NULL pointer (no-op)
+- Must be called after `emu_load_rom()` for execution to begin
+- Can be called multiple times (simulates repeated ON key presses)
+- The boot process takes approximately 1-2 seconds of emulated time
+
+---
+
+## Complete Lifecycle Example
+
+```c
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+typedef struct SyncEmu SyncEmu;
+
+extern SyncEmu* emu_create(void);
+extern void emu_destroy(SyncEmu* emu);
+extern void emu_reset(SyncEmu* emu);
+extern void emu_power_on(SyncEmu* emu);
+extern int emu_load_rom(SyncEmu* emu, const uint8_t* data, size_t len);
+extern int emu_run_cycles(SyncEmu* emu, int32_t cycles);
+
+int main(void) {
+    // 1. Create instance
+    SyncEmu* emu = emu_create();
+    if (!emu) {
+        fprintf(stderr, "Failed to create emulator\n");
+        return 1;
+    }
+    
+    // 2. Load ROM
+    uint8_t* rom = load_rom_file("TI-84-CE.rom");
+    if (emu_load_rom(emu, rom, rom_size) != 0) {
+        fprintf(stderr, "Failed to load ROM\n");
+        free(rom);
+        emu_destroy(emu);
+        return 1;
+    }
+    free(rom);
+    
+    // 3. Power on
+    emu_power_on(emu);
+    
+    // 4. Run until home screen appears
+    printf("Booting...\n");
+    for (int i = 0; i < 200; i++) {
+        emu_run_cycles(emu, 250000);
+    }
+    printf("Boot complete\n");
+    
+    // 5. Reset to start over
+    printf("Resetting...\n");
+    emu_reset(emu);
+    emu_power_on(emu);
+    
+    // 6. Cleanup
+    emu_destroy(emu);
+    
+    return 0;
+}
+```
+
+## See Also
+
+- [ROM Management](/api/rom-management) - Load ROM and send files
+- [Execution](/api/execution) - Run emulation cycles
+- [C API Overview](/api/c-api-overview) - General usage patterns

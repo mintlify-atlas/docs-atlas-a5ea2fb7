@@ -1,0 +1,539 @@
+---
+title: 'Android Integration'
+description: 'Integrate the TI-84 Plus CE emulator core into Android applications'
+---
+
+## Overview
+
+The Android app uses Kotlin with Jetpack Compose for the UI and integrates the emulator core via JNI (Java Native Interface). The core can be built with either the Rust implementation or the CEmu reference backend.
+
+## Architecture
+
+```
+┌─────────────────────────────────────┐
+│   Android App (Kotlin/Compose)     │
+│   - MainActivity.kt                 │
+│   - EmulatorBridge.kt               │
+├─────────────────────────────────────┤
+│   JNI Bridge (C++)                  │
+│   - jni_loader.cpp                  │
+│   - backend_wrapper.cpp             │
+├─────────────────────────────────────┤
+│   Emulator Backend                  │
+│   - libemu_rust.so (Rust core)      │
+│   - libemu_cemu.so (CEmu adapter)   │
+└─────────────────────────────────────┘
+```
+
+The JNI layer loads backends dynamically at runtime using `dlopen()`, allowing the app to switch between Rust and CEmu without recompilation.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Install Android Studio">
+    Download and install [Android Studio](https://developer.android.com/studio) with Android SDK API 24+
+  </Step>
+  
+  <Step title="Install Android NDK">
+    Install the NDK through Android Studio's SDK Manager or set `ANDROID_NDK_HOME`
+  </Step>
+  
+  <Step title="Install Rust">
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ```
+  </Step>
+  
+  <Step title="Add Android targets">
+    ```bash
+    rustup target add aarch64-linux-android    # ARM64 (most devices)
+    rustup target add armv7-linux-androideabi  # ARM32 (older devices)
+    rustup target add x86_64-linux-android     # x86_64 emulator
+    rustup target add i686-linux-android       # x86 emulator
+    ```
+  </Step>
+</Steps>
+
+## Building
+
+### Using the Unified Build Script
+
+The project includes a unified build script that handles both Rust compilation and APK packaging:
+
+```bash
+# Release build (ARM64 only, Rust backend)
+./scripts/build.sh android
+
+# Debug build with installation
+./scripts/build.sh android --debug --install
+
+# Build with CEmu backend
+./scripts/build.sh android --cemu
+
+# Build all ABIs (ARM64, ARM32, x86_64, x86)
+./scripts/build.sh android --all-abis
+```
+
+<Info>
+  The build script automatically:
+  - Compiles the Rust core for the target architecture(s)
+  - Runs Gradle to build the APK
+  - Optionally installs the APK via `adb`
+</Info>
+
+### Using Make Shortcuts
+
+```bash
+make android              # Release, ARM64, Rust
+make android-debug        # Debug, ARM64, Rust
+make android-cemu         # Release, CEmu backend
+make android-install      # Release + install to device
+make android-cemu-install # CEmu + install
+```
+
+### Manual Gradle Build
+
+If you prefer to use Gradle directly (after building the Rust core manually):
+
+```bash
+cd android
+./gradlew assembleDebug    # Debug build
+./gradlew assembleRelease  # Release build
+```
+
+## Integration Guide
+
+### Step 1: Initialize EmulatorBridge
+
+The `EmulatorBridge` class provides a Kotlin-friendly interface to the native emulator:
+
+```kotlin MainActivity.kt
+class MainActivity : ComponentActivity() {
+    private val emulator = EmulatorBridge()
+    
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        // Initialize with application context
+        EmulatorBridge.initialize(applicationContext)
+        
+        // Set preferred backend (optional)
+        emulator.setBackend("rust") // or "cemu"
+        
+        // Create emulator instance
+        if (!emulator.create()) {
+            Log.e(TAG, "Failed to create emulator")
+            return
+        }
+        
+        // ... UI setup
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        emulator.destroy()
+    }
+}
+```
+
+### Step 2: Load ROM and Start Emulation
+
+```kotlin Loading ROM
+// Load ROM from ByteArray
+val romBytes: ByteArray = loadRomFromFile()
+val result = emulator.loadRom(romBytes)
+
+if (result == 0) {
+    // ROM loaded successfully
+    Log.i(TAG, "ROM loaded: ${romBytes.size} bytes")
+    
+    // Power on the calculator
+    emulator.powerOn()
+} else {
+    Log.e(TAG, "Failed to load ROM: error $result")
+}
+```
+
+### Step 3: Run the Emulation Loop
+
+The emulator runs cycle-by-cycle. For real-time emulation at 48MHz and 60 FPS:
+
+```kotlin Emulation Loop
+val CYCLES_PER_FRAME = 800_000  // 48MHz / 60 FPS
+val FRAME_INTERVAL_MS = 16L     // ~60 FPS
+
+LaunchedEffect(isRunning) {
+    if (isRunning) {
+        while (isRunning) {
+            val frameStart = System.nanoTime()
+            
+            // Run emulation
+            val executed = withContext(Dispatchers.Default) {
+                emulator.runCycles(CYCLES_PER_FRAME)
+            }
+            
+            // Throttle to 60 FPS
+            val elapsedMs = (System.nanoTime() - frameStart) / 1_000_000
+            val remainingMs = FRAME_INTERVAL_MS - elapsedMs
+            if (remainingMs > 0) {
+                delay(remainingMs)
+            }
+        }
+    }
+}
+```
+
+### Step 4: Render the Display
+
+The emulator provides a framebuffer as ARGB8888 pixels:
+
+```kotlin Rendering
+// Create bitmap for framebuffer
+val bitmap = Bitmap.createBitmap(
+    emulator.getWidth(),   // 320
+    emulator.getHeight(),  // 240
+    Bitmap.Config.ARGB_8888
+)
+
+// Copy framebuffer to bitmap
+emulator.copyFramebufferToBitmap(bitmap)
+
+// Display in Compose
+Image(
+    bitmap = bitmap.asImageBitmap(),
+    contentDescription = "Emulator screen",
+    modifier = Modifier.fillMaxSize(),
+    contentScale = ContentScale.Fit,
+    filterQuality = FilterQuality.None  // Nearest-neighbor for pixels
+)
+```
+
+### Step 5: Handle Keyboard Input
+
+The TI-84 Plus CE uses an 8×7 key matrix:
+
+```kotlin Key Input
+// Press a key
+emulator.setKey(row = 6, col = 0, down = true)  // ENTER key
+
+// Release a key
+emulator.setKey(row = 6, col = 0, down = false)
+```
+
+<Accordion title="Key Matrix Reference">
+  Common key positions:
+  - ON key: `(2, 0)`
+  - ENTER key: `(6, 0)`
+  - Arrow keys: Down `(7, 0)`, Left `(7, 1)`, Right `(7, 2)`, Up `(7, 3)`
+  - Number keys: `0` is `(3, 0)`, `1` is `(3, 1)`, ..., `9` is `(5, 3)`
+  - Math: `+` is `(6, 1)`, `-` is `(6, 2)`, `×` is `(6, 3)`, `÷` is `(6, 4)`
+  
+  See `source/android/app/src/main/java/com/calc/emulator/MainActivity.kt` for the complete key map.
+</Accordion>
+
+### Step 6: State Persistence
+
+Save and restore emulator state for seamless app backgrounding:
+
+```kotlin State Management
+// Save state
+val stateData: ByteArray? = emulator.saveState()
+if (stateData != null) {
+    // Write to file or database
+    File(filesDir, "emulator.state").writeBytes(stateData)
+    Log.i(TAG, "State saved: ${stateData.size} bytes")
+}
+
+// Load state
+val stateData = File(filesDir, "emulator.state").readBytes()
+val result = emulator.loadState(stateData)
+if (result == 0) {
+    Log.i(TAG, "State restored")
+} else {
+    Log.e(TAG, "Failed to load state: error $result")
+}
+```
+
+### Step 7: Loading Program Files
+
+Inject `.8xp` (programs) or `.8xv` (app variables) into the calculator's flash:
+
+```kotlin Program Loading
+// Load ROM first
+emulator.loadRom(romBytes)
+
+// Inject program files BEFORE powering on
+val programBytes = File("DOOM.8xp").readBytes()
+val count = emulator.sendFile(programBytes)
+
+if (count >= 0) {
+    Log.i(TAG, "Injected $count entries")
+} else {
+    Log.e(TAG, "Failed to inject file: error $count")
+}
+
+// Now power on - programs will appear in the PRGM menu
+emulator.powerOn()
+```
+
+## Backend Switching
+
+The Android app supports runtime backend switching when multiple backends are available:
+
+```kotlin Backend Switching
+// Get available backends
+val backends = EmulatorBridge.getAvailableBackends()  // ["rust", "cemu"]
+
+// Check current backend
+val current = emulator.getCurrentBackend()  // "rust"
+
+// Switch backend (destroys current instance)
+emulator.destroy()
+emulator.setBackend("cemu")
+emulator.create()
+emulator.loadRom(romBytes)  // Reload ROM
+```
+
+<Warning>
+  Switching backends destroys the current emulator instance. Save any state before switching.
+</Warning>
+
+## Native Integration (JNI)
+
+For advanced use cases, you can interact with the JNI layer directly.
+
+### JNI Method Signatures
+
+From `EmulatorBridge.kt:346`:
+
+```kotlin JNI Methods
+private external fun nativeCreate(): Long
+private external fun nativeDestroy(handle: Long)
+private external fun nativeLoadRom(handle: Long, romBytes: ByteArray): Int
+private external fun nativeRunCycles(handle: Long, cycles: Int): Int
+private external fun nativeCopyFramebuffer(handle: Long, outArgb: IntArray): Int
+private external fun nativeSetKey(handle: Long, row: Int, col: Int, down: Boolean)
+private external fun nativeGetBacklight(handle: Long): Int
+private external fun nativeIsLcdOn(handle: Long): Boolean
+private external fun nativeSaveState(handle: Long, outData: ByteArray): Int
+private external fun nativeLoadState(handle: Long, stateData: ByteArray): Int
+```
+
+### CMake Configuration
+
+The native build is configured in `android/app/src/main/cpp/CMakeLists.txt:1`:
+
+```cmake CMakeLists.txt
+cmake_minimum_required(VERSION 3.22.1)
+project("emu_jni")
+
+# Build Rust backend
+add_library(emu_rust SHARED backend_wrapper.cpp)
+target_link_libraries(emu_rust emu_core android log)
+
+# JNI bridge
+add_library(emu_jni SHARED jni_loader.cpp)
+target_link_libraries(emu_jni android log)
+```
+
+The build system automatically compiles the Rust core and links it into the JNI wrapper.
+
+## Performance Tuning
+
+### Cycle Budget
+
+At 48MHz and 60 FPS, each frame should execute ~800,000 cycles. Adjust based on your performance needs:
+
+```kotlin Performance Tuning
+// Real-time (1x speed)
+val CYCLES_PER_FRAME = 800_000
+
+// 2x speed (fast-forward)
+val CYCLES_PER_FRAME = 1_600_000
+
+// 0.5x speed (slow motion)
+val CYCLES_PER_FRAME = 400_000
+```
+
+### Display Updates
+
+Only copy the framebuffer when the LCD is on:
+
+```kotlin Display Check
+if (emulator.isLcdOn()) {
+    emulator.copyFramebufferToBitmap(bitmap)
+} else {
+    // Show black screen (calculator is off or sleeping)
+    canvas.drawColor(Color.BLACK)
+}
+```
+
+### Background Execution
+
+Pause emulation when the app goes to background:
+
+```kotlin Lifecycle
+override fun onPause() {
+    super.onPause()
+    isRunning = false
+    
+    // Save state
+    val stateData = emulator.saveState()
+    // ... persist to storage
+}
+
+override fun onResume() {
+    super.onResume()
+    // Load state
+    // ...
+    isRunning = true
+}
+```
+
+## Example App
+
+The reference implementation is available at `source/android/`:
+
+- **MainActivity.kt** - Main activity with emulation loop and UI
+- **EmulatorBridge.kt** - Kotlin wrapper around JNI
+- **EmulatorPreferences.kt** - Shared preferences for settings
+- **StateManager.kt** - State persistence to app storage
+
+## API Reference
+
+### EmulatorBridge Methods
+
+<ParamField path="create()" type="Boolean">
+  Create the emulator instance. Must be called before any other operations.
+  
+  **Returns:** `true` on success, `false` on failure
+</ParamField>
+
+<ParamField path="destroy()" type="Unit">
+  Destroy the emulator instance and free resources.
+</ParamField>
+
+<ParamField path="loadRom(romBytes: ByteArray)" type="Int">
+  Load ROM data into the emulator.
+  
+  **Parameters:**
+  - `romBytes`: ROM file contents (typically 4MB for TI-84 Plus CE)
+  
+  **Returns:** `0` on success, negative error code on failure
+</ParamField>
+
+<ParamField path="sendFile(fileBytes: ByteArray)" type="Int">
+  Inject a `.8xp` or `.8xv` file into flash. Must be called after `loadRom()` and before `powerOn()`.
+  
+  **Parameters:**
+  - `fileBytes`: Program or AppVar file contents
+  
+  **Returns:** Number of entries injected (≥0), or negative error code
+</ParamField>
+
+<ParamField path="powerOn()" type="Unit">
+  Simulate ON key press+release to start execution. Call after `loadRom()`.
+</ParamField>
+
+<ParamField path="reset()" type="Unit">
+  Reset the emulator to initial state (cold boot).
+</ParamField>
+
+<ParamField path="runCycles(cycles: Int)" type="Int">
+  Run emulation for the specified number of CPU cycles.
+  
+  **Parameters:**
+  - `cycles`: Number of cycles to execute (typically 800,000 per frame)
+  
+  **Returns:** Number of cycles actually executed
+</ParamField>
+
+<ParamField path="copyFramebufferToBitmap(bitmap: Bitmap)" type="Boolean">
+  Copy the current framebuffer to an Android Bitmap.
+  
+  **Parameters:**
+  - `bitmap`: Target bitmap (must be 320×240, ARGB_8888)
+  
+  **Returns:** `true` on success
+</ParamField>
+
+<ParamField path="setKey(row: Int, col: Int, down: Boolean)" type="Unit">
+  Set key state in the 8×7 key matrix.
+  
+  **Parameters:**
+  - `row`: Key row (0-7)
+  - `col`: Key column (0-7)
+  - `down`: `true` if pressed, `false` if released
+</ParamField>
+
+<ParamField path="isLcdOn()" type="Boolean">
+  Check if the LCD is on (should display content).
+  
+  **Returns:** `true` if LCD is active, `false` if off or sleeping
+</ParamField>
+
+<ParamField path="getBacklight()" type="Int">
+  Get the backlight brightness level.
+  
+  **Returns:** 0-255 (0 = off/black)
+</ParamField>
+
+<ParamField path="saveState()" type="ByteArray?">
+  Save the current emulator state.
+  
+  **Returns:** State data as ByteArray, or null on failure
+</ParamField>
+
+<ParamField path="loadState(stateData: ByteArray)" type="Int">
+  Load a saved emulator state.
+  
+  **Parameters:**
+  - `stateData`: Previously saved state data
+  
+  **Returns:** `0` on success, negative error code on failure
+</ParamField>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Build fails: ANDROID_NDK_HOME not set">
+    Set the environment variable to your NDK installation:
+    ```bash
+    export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/26.1.10909125
+    ```
+    Or let the build script auto-detect it from `ANDROID_HOME`.
+  </Accordion>
+  
+  <Accordion title="App crashes on startup with UnsatisfiedLinkError">
+    Ensure the Rust core was built for the correct architecture:
+    ```bash
+    ./scripts/build.sh android --all-abis
+    ```
+    This builds for all ABIs (ARM64, ARM32, x86_64, x86).
+  </Accordion>
+  
+  <Accordion title="Emulator runs slowly or stutters">
+    - Reduce the cycle count: try 400,000 cycles per frame (0.5x speed)
+    - Build in Release mode: `--release` flag
+    - Profile with Android Studio's CPU Profiler
+  </Accordion>
+  
+  <Accordion title="Screen stays black after loading ROM">
+    Call `powerOn()` after loading the ROM to simulate pressing the ON key:
+    ```kotlin
+    emulator.loadRom(romBytes)
+    emulator.powerOn()  // Don't forget this!
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="iOS Integration" icon="apple" href="/platforms/ios">
+    Learn how to integrate the emulator into iOS apps with Swift
+  </Card>
+  <Card title="Web Integration" icon="globe" href="/platforms/web">
+    Build a web version using WebAssembly
+  </Card>
+</CardGroup>

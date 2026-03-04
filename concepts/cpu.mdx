@@ -1,0 +1,462 @@
+---
+title: "eZ80 CPU Architecture"
+description: "Understanding the eZ80 instruction set, ADL mode, and execution model"
+---
+
+# eZ80 CPU Architecture
+
+The TI-84 Plus CE uses the Zilog eZ80 CPU, a Z80-compatible processor with extended 24-bit addressing capabilities. The emulator implements the complete eZ80 instruction set with cycle-accurate timing.
+
+## Overview
+
+The eZ80 is a hybrid CPU that supports:
+- **Z80 mode**: 16-bit addressing with MBASE register (backward compatibility)
+- **ADL mode**: 24-bit addressing (Address Data Long)
+- **Mixed mode**: Dynamic switching between Z80 and ADL modes per instruction
+
+## Register Set
+
+### Main Registers (ADL Mode)
+
+```
+┌─────────────────────────────────┐
+│ A (8-bit)      │ F (8-bit flags)│  AF accumulator/flags
+├─────────────────────────────────┤
+│ BC (24-bit)                     │  BC register pair
+├─────────────────────────────────┤
+│ DE (24-bit)                     │  DE register pair
+├─────────────────────────────────┤
+│ HL (24-bit)                     │  HL register pair
+├─────────────────────────────────┤
+│ IX (24-bit)                     │  Index register X
+├─────────────────────────────────┤
+│ IY (24-bit)                     │  Index register Y
+├─────────────────────────────────┤
+│ SPL (24-bit)                    │  ADL stack pointer
+├─────────────────────────────────┤
+│ SPS (24-bit)                    │  Z80 stack pointer
+├─────────────────────────────────┤
+│ PC (24-bit)                     │  Program counter
+└─────────────────────────────────┘
+```
+
+### Special Registers
+
+- **I** (16-bit): Interrupt vector base for mode 2 interrupts
+- **R** (8-bit): Memory refresh register (increments per instruction)
+- **MBASE** (8-bit): Memory base register for Z80 mode addressing
+
+### Shadow Registers
+
+For fast context switching:
+- **AF'**: Shadow accumulator/flags
+- **BC'**: Shadow BC
+- **DE'**: Shadow DE
+- **HL'**: Shadow HL
+
+Exchanged via `EX AF, AF'` and `EXX` instructions.
+
+### Flags Register (F)
+
+```
+Bit  Flag  Name         Description
+7    S     Sign         Set if result is negative (bit 7 = 1)
+6    Z     Zero         Set if result is zero
+5    Y     Undocumented Copy of bit 5 of result
+4    H     Half-carry   Set if carry from bit 3 to bit 4
+3    X     Undocumented Copy of bit 3 of result
+2    P/V   Parity/      Parity (even=1) or overflow
+              Overflow
+1    N     Subtract     Set if last operation was subtraction
+0    C     Carry        Set if carry/borrow occurred
+```
+
+## ADL Mode
+
+### Address Data Long (ADL)
+
+When **ADL = 1**:
+- All register pairs (BC, DE, HL, IX, IY, SP) are 24-bit
+- Memory addresses are 24-bit
+- Stack operations push/pop 3 bytes
+- `CALL`/`RET` use 24-bit return addresses
+
+**Setting ADL mode**:
+```asm
+STMIX      ; Enable mixed mode, set ADL=1
+```
+
+**Clearing ADL mode**:
+```asm
+RSMIX      ; Disable mixed mode, set ADL=0
+```
+
+### Z80 Mode
+
+When **ADL = 0**:
+- Register pairs are 16-bit (upper byte preserved but ignored)
+- Memory addresses are 16-bit + MBASE (8-bit page register)
+  - Effective address = `(MBASE << 16) | 16-bit_address`
+- Stack operations push/pop 2 bytes
+- `CALL`/`RET` use 16-bit return addresses
+
+### Per-Instruction Mode Flags
+
+eZ80 supports **mixed-mode execution** with per-instruction overrides:
+
+- **L**: Data addressing mode for current instruction
+  - `L=1`: Use 24-bit addresses for memory operands
+  - `L=0`: Use 16-bit addresses (MBASE applied)
+- **IL**: Instruction/index addressing mode
+  - `IL=1`: Use 24-bit addresses for instruction fetches
+  - `IL=0`: Use 16-bit addresses (MBASE applied)
+
+**Suffix opcodes** override L/IL for the following instruction:
+
+```asm
+.SIS  ; Set L=0, IL=0 (short data, short instruction)
+.LIS  ; Set L=1, IL=0 (long data, short instruction)
+.SIL  ; Set L=0, IL=1 (short data, long instruction)
+.LIL  ; Set L=1, IL=1 (long data, long instruction)
+```
+
+**Example**:
+```asm
+.LIS        ; Override: L=1, IL=0
+LD HL, (DE) ; DE is 24-bit address, HL loaded with 24-bit value
+            ; Next instruction returns to ADL mode defaults
+```
+
+## Instruction Execution
+
+### Fetch-Decode-Execute Cycle
+
+```
+1. Fetch opcode byte from PC
+2. Increment PC
+3. Decode opcode (may require additional bytes for DD/FD/ED/CB prefixes)
+4. Execute instruction
+5. Update flags
+6. Charge cycles to bus
+```
+
+### Prefix Bytes
+
+eZ80 uses prefix bytes to extend the instruction set:
+
+| Prefix | Category | Example Instructions |
+|--------|----------|---------------------|
+| `DD`   | IX-indexed | `LD A, (IX+d)` |
+| `FD`   | IY-indexed | `LD A, (IY+d)` |
+| `ED`   | Extended | `ADC HL, BC`, `LDI`, `MLT` |
+| `CB`   | Bit operations | `BIT n, r`, `SET n, r` |
+| `DD CB`| IX bit ops | `BIT n, (IX+d)` |
+| `FD CB`| IY bit ops | `BIT n, (IY+d)` |
+
+### eZ80-Specific Instructions
+
+The eZ80 adds several instructions beyond the standard Z80:
+
+#### `MLT` - Multiply
+```asm
+MLT BC  ; BC = B × C (unsigned 8×8 → 16)
+MLT DE  ; DE = D × E
+MLT HL  ; HL = H × L
+MLT SP  ; SP = high(SP) × low(SP)
+```
+**Opcode**: `ED 4C/5C/6C/7C`  
+**Cycles**: 8
+
+#### `LEA` - Load Effective Address
+```asm
+LEA IX, IX+d  ; IX = IX + displacement (no flags affected)
+LEA IY, IY+d  ; IY = IY + displacement
+LEA BC, IX+d  ; BC = IX + displacement
+LEA DE, IY+d  ; DE = IY + displacement
+```
+**Opcode**: `ED 22/23 + register encoding`  
+**Cycles**: 3
+
+#### `PEA` - Push Effective Address
+```asm
+PEA IX+d  ; Push IX+d onto stack (24-bit in ADL mode)
+PEA IY+d  ; Push IY+d onto stack
+```
+**Opcode**: `ED 65/66`  
+**Cycles**: 7 (ADL) or 5 (Z80)
+
+#### `LD A, MB` - Load MBASE
+```asm
+LD A, MB  ; Load MBASE register into A
+```
+**Opcode**: `ED 6E`  
+**Cycles**: 2  
+**Used by ROM**: For RAM address validation during boot
+
+#### `STMIX` / `RSMIX` - Mixed Mode Control
+```asm
+STMIX  ; Set MADL=1, ADL=1 (enable mixed mode)
+RSMIX  ; Set MADL=0, ADL=0 (disable mixed mode)
+```
+**Opcode**: `ED 7D` / `ED 7E`  
+**Cycles**: 1
+
+## Interrupt Handling
+
+### Interrupt Enable Flip-Flops
+
+- **IFF1**: Master interrupt enable (checked before servicing IRQ)
+- **IFF2**: Shadow of IFF1 (preserved during NMI)
+
+**Instructions**:
+```asm
+EI    ; Enable interrupts after next instruction
+DI    ; Disable interrupts immediately
+```
+
+**EI delay**: Interrupts enable **after** the instruction following `EI`, allowing:
+```asm
+EI
+RETI  ; Return with interrupts enabled, no ISR re-entry
+```
+
+### Interrupt Modes
+
+#### Mode 0 (IM 0)
+```asm
+IM 0  ; Execute instruction from data bus (not used on CE)
+```
+
+#### Mode 1 (IM 1)
+```asm
+IM 1  ; Call fixed address 0x0038
+```
+**Behavior**: Equivalent to `RST 0x38`
+
+#### Mode 2 (IM 2)
+```asm
+IM 2  ; Vectored interrupts via I register
+```
+**Behavior**:
+1. Read interrupt vector byte from device (typically 0x00)
+2. Form 16-bit address: `(I << 8) | vector`
+3. Read 24-bit handler address from that location
+4. Jump to handler
+
+### NMI (Non-Maskable Interrupt)
+
+**Triggered by**:
+- Memory protection violations (stack limit, protected RAM writes)
+- External NMI signal (not used on CE)
+
+**Behavior**:
+1. Save IFF1 to IFF2
+2. Clear IFF1 (disable interrupts)
+3. Call 0x0066
+
+**Recovery**:
+```asm
+RETN  ; Return from NMI, restore IFF1 from IFF2
+```
+
+## Cycle Timing
+
+### Instruction Timing
+
+Instructions charge cycles based on:
+- **Opcode complexity**: Simple ops (1-2 cycles), complex ops (4-8 cycles)
+- **Memory accesses**: Flash reads (10 cycles), RAM reads (4 cycles)
+- **Prefixes**: DD/FD add 1 cycle, CB adds 2 cycles
+- **Operand size**: ADL mode adds cycles for 24-bit operations
+
+**Example timing**:
+
+| Instruction | Opcode | Internal | Memory | Total |
+|-------------|--------|----------|--------|-------|
+| `NOP` | F3 | 1 | 0 | 1 |
+| `LD A, B` | 78 | 1 | 0 | 1 |
+| `LD A, (HL)` | 7E | 1 | 4 (RAM read) | 5 |
+| `LD HL, nnnn` | 21 nn nn nn | 3 | 0 | 3 |
+| `CALL nn` (ADL) | CD nn nn nn | 5 | 10 (stack write) | 15 |
+| `MLT BC` | ED 4C | 8 | 0 | 8 |
+
+### Prefetch Buffer
+
+The emulator maintains a **prefetch buffer** to match CEmu's cycle accounting:
+
+- During each fetch, the **next byte** is prefetched
+- The prefetch cost is charged to the **current instruction**
+- This matches real hardware behavior where the bus is kept busy
+
+**Implementation**:
+```rust
+pub struct Cpu {
+    pub prefetch: u8,  // Next byte already fetched
+    // ...
+}
+
+fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
+    let value = self.prefetch;  // Use prefetched byte
+    let next_pc = self.pc.wrapping_add(1);
+    self.prefetch = bus.fetch_byte(next_pc, self.pc);  // Prefetch next
+    self.pc = next_pc;
+    value
+}
+```
+
+## CPU State
+
+### HALT State
+
+```asm
+HALT  ; Stop execution until interrupt
+```
+
+**Wake conditions**:
+1. Maskable interrupt (IRQ) if IFF1=1
+2. Non-maskable interrupt (NMI)
+3. ON key press (TI-specific, wakes even if IFF1=0)
+4. Any key press (when keypad in any-key mode)
+
+**Optimization**: The emulator fast-forwards through HALT by skipping to the next scheduled event (LCD DMA, timer, etc.) instead of single-stepping.
+
+### Execution History
+
+For debugging, the emulator maintains a 64-entry ring buffer:
+
+```rust
+struct HistoryEntry {
+    pc: u32,
+    opcode: [u8; 4],
+    opcode_len: u8,
+}
+```
+
+Useful for crash analysis - shows last 64 instructions before a fault.
+
+## Critical eZ80 Behaviors
+
+### Flash Unlock Sequence
+
+Flash writes require detecting a specific instruction sequence fetched from **privileged code** (PC ≤ privileged boundary):
+
+```asm
+DI
+JR 0      ; NOP equivalent
+DI
+IM 2
+IM 1
+OUT0 (0x28), A
+IN0 A, (0x28)
+BIT 2, A  ; Detection triggers on this opcode byte (0x57)
+```
+
+When detected, port 0x28 bit 2 is set (flash ready for write).
+
+### ADL Mode Persistence
+
+**Key rule**: `CALL`, `RET`, and `RST` with IL=1 set ADL=IL **permanently** for the called function.
+
+```asm
+.LIL          ; IL=1, L=1
+CALL func     ; Jumps with 24-bit address, sets ADL=1 in func
+              ; func runs in ADL mode until RSMIX
+```
+
+This allows mixed Z80/ADL code in the same ROM.
+
+### Stack Pointer Selection
+
+```rust
+fn sp(&self) -> u32 {
+    if self.l { self.spl } else { self.sps }
+}
+```
+
+The **L flag** selects SPL (24-bit) or SPS (16-bit) for stack operations.
+
+## Instruction Set Reference
+
+### Opcode Table (Base Instructions)
+
+The eZ80 instruction set is organized by opcode byte patterns:
+
+```
+Opcode byte: [x x | y y y | z z z]
+             bits: 7-6   5-3   2-0
+
+x=0: Misc (NOP, LD, DJNZ, JR, etc.)
+x=1: LD r, r' (8-bit register moves)
+x=2: ALU A, r (ADD, ADC, SUB, SBC, AND, XOR, OR, CP)
+x=3: Misc (RET, POP, JP, CALL, PUSH, RST, IN, OUT)
+```
+
+See the [eZ80 CPU User Manual](https://www.zilog.com/docs/um0077.pdf) for complete opcode tables.
+
+## Testing and Verification
+
+### Trace Format
+
+For parity testing with CEmu:
+
+```csv
+step,cycles,PC,SP,AF,BC,DE,HL,IX,IY,ADL,IFF1,IFF2,IM,HALT,opcode
+0,0,000000,000000,00FF,000000,000000,000000,000000,000000,0,0,0,0,0,F3
+1,1,000001,000000,00FF,000000,000000,000000,000000,000000,0,0,0,0,0,18
+```
+
+**Generate trace**:
+```bash
+cd core
+cargo run --release --example debug -- trace 100000
+```
+
+### Common Test Points
+
+- **Boot sequence**: First 1M cycles should match CEmu exactly
+- **Flag behavior**: Verify S/Z/H/P/N/C flags for all ALU operations
+- **ADL mode**: Test 24-bit addressing with mixed-mode calls
+- **Interrupts**: Verify IM 1/2 handler dispatch and RETI
+- **eZ80 extensions**: MLT, LEA, PEA, LD A,MB timing
+
+## Performance Optimizations
+
+### Cycle Batching
+
+During HALT, the emulator batches peripheral ticks:
+
+```rust
+const HALT_TICK_BATCH: u64 = 10_000;
+
+while halted {
+    let skip = scheduler.cycles_until_next_event();
+    if skip == 0 {
+        // Batch advance to avoid overhead
+        bus.add_cycles(HALT_TICK_BATCH);
+        tick_peripherals(HALT_TICK_BATCH);
+    } else {
+        bus.add_cycles(skip);
+        process_scheduler_events();
+    }
+}
+```
+
+This reduces overhead when CPU is idle waiting for timers.
+
+### Inline Hot Paths
+
+Critical functions are marked `#[inline(always)]`:
+
+```rust
+#[inline(always)]
+fn fetch_byte(&mut self, bus: &mut Bus) -> u8 { ... }
+
+#[inline(always)]
+fn set_flags_sz(&mut self, val: u8) { ... }
+```
+
+## Next Steps
+
+- [Emulator Core](/concepts/emulator-core) - Core architecture overview
+- [Memory Map](/concepts/memory-map) - Address space and peripherals
+- [Dual Backend](/concepts/dual-backend) - Cycle timing modes

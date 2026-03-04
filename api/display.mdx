@@ -1,0 +1,395 @@
+---
+title: Display Access
+description: Access framebuffer, LCD state, and backlight information
+---
+
+The display API provides access to the emulator's screen output, LCD power state, and backlight level.
+
+## emu_framebuffer
+
+Get a pointer to the framebuffer data.
+
+```c
+const uint32_t* emu_framebuffer(const SyncEmu* emu, int32_t* w, int32_t* h);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+- **w**: Output pointer for width (may be NULL)
+- **h**: Output pointer for height (may be NULL)
+
+### Returns
+
+- **Non-null pointer**: Pointer to framebuffer data (ARGB8888 format)
+- **NULL**: Invalid emulator pointer
+
+### Description
+
+Returns a pointer to the emulator's framebuffer containing the current screen contents. The framebuffer is in ARGB8888 format (32 bits per pixel) with dimensions typically 320x240.
+
+The width and height are written to the provided pointers if they are non-null.
+
+<Warning>
+**Important**: The returned pointer is only valid during the function call. The internal mutex protects the data, but you must copy the framebuffer data immediately. Do not store the pointer for later use.
+</Warning>
+
+### Framebuffer Format
+
+- **Format**: ARGB8888 (32-bit)
+- **Byte order**: `[AA BB GG RR]` in memory
+- **Size**: `width * height * 4` bytes
+- **Layout**: Row-major, top-to-bottom
+
+```c
+// Pixel format
+typedef union {
+    uint32_t value;
+    struct {
+        uint8_t r;  // Red
+        uint8_t g;  // Green
+        uint8_t b;  // Blue
+        uint8_t a;  // Alpha (always 0xFF)
+    };
+} Pixel;
+```
+
+### Example: Copy Framebuffer
+
+```c
+#include <string.h>
+#include <stdint.h>
+
+void copy_framebuffer(SyncEmu* emu, uint32_t* dest_buffer) {
+    int32_t width, height;
+    const uint32_t* fb = emu_framebuffer(emu, &width, &height);
+    
+    if (!fb) {
+        fprintf(stderr, "Failed to get framebuffer\n");
+        return;
+    }
+    
+    size_t size = width * height * sizeof(uint32_t);
+    memcpy(dest_buffer, fb, size);
+    
+    printf("Copied %dx%d framebuffer (%zu bytes)\n",
+           width, height, size);
+}
+```
+
+### Example: Render to SDL2
+
+```c
+#include <SDL2/SDL.h>
+
+void render_to_sdl(SyncEmu* emu, SDL_Renderer* renderer, SDL_Texture* texture) {
+    int32_t width, height;
+    const uint32_t* fb = emu_framebuffer(emu, &width, &height);
+    
+    if (!fb) return;
+    
+    // Update SDL texture with framebuffer data
+    SDL_UpdateTexture(texture, NULL, fb, width * sizeof(uint32_t));
+    
+    // Render to screen
+    SDL_RenderClear(renderer);
+    SDL_RenderCopy(renderer, texture, NULL, NULL);
+    SDL_RenderPresent(renderer);
+}
+
+// Setup
+SDL_Texture* setup_sdl_texture(SDL_Renderer* renderer) {
+    return SDL_CreateTexture(
+        renderer,
+        SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_STREAMING,
+        320, 240
+    );
+}
+```
+
+### Example: Save to PNG
+
+```c
+// Using stb_image_write.h
+#include "stb_image_write.h"
+
+void save_screenshot(SyncEmu* emu, const char* filename) {
+    int32_t width, height;
+    const uint32_t* fb = emu_framebuffer(emu, &width, &height);
+    
+    if (!fb) {
+        fprintf(stderr, "Failed to get framebuffer\n");
+        return;
+    }
+    
+    // Copy framebuffer (can't use directly due to mutex)
+    size_t size = width * height * sizeof(uint32_t);
+    uint32_t* buffer = malloc(size);
+    memcpy(buffer, fb, size);
+    
+    // Convert ARGB to RGBA for PNG
+    for (int i = 0; i < width * height; i++) {
+        uint32_t pixel = buffer[i];
+        uint8_t* p = (uint8_t*)&buffer[i];
+        uint8_t r = (pixel >> 0) & 0xFF;
+        uint8_t g = (pixel >> 8) & 0xFF;
+        uint8_t b = (pixel >> 16) & 0xFF;
+        uint8_t a = (pixel >> 24) & 0xFF;
+        p[0] = r; p[1] = g; p[2] = b; p[3] = a;
+    }
+    
+    stbi_write_png(filename, width, height, 4, buffer, width * 4);
+    free(buffer);
+    
+    printf("Saved screenshot to %s\n", filename);
+}
+```
+
+---
+
+## emu_is_lcd_on
+
+Check if the LCD is powered on and should display content.
+
+```c
+int emu_is_lcd_on(const SyncEmu* emu);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+
+### Returns
+
+- **1**: LCD is on (display should show content)
+- **0**: LCD is off (display should be blank)
+
+### Description
+
+Returns whether the LCD is currently powered on. The LCD is considered off when either:
+- Control port 0x05 bit 4 is clear (master LCD disable), OR
+- LCD control register bit 11 is clear (LCD controller disable)
+
+When the LCD is off, the screen should be rendered as black or blank, regardless of framebuffer contents.
+
+### Example: Conditional Rendering
+
+```c
+void render_display(SyncEmu* emu, SDL_Renderer* renderer, SDL_Texture* texture) {
+    if (emu_is_lcd_on(emu)) {
+        // LCD is on - render framebuffer
+        int32_t width, height;
+        const uint32_t* fb = emu_framebuffer(emu, &width, &height);
+        SDL_UpdateTexture(texture, NULL, fb, width * sizeof(uint32_t));
+        SDL_RenderCopy(renderer, texture, NULL, NULL);
+    } else {
+        // LCD is off - render blank screen
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+    }
+    
+    SDL_RenderPresent(renderer);
+}
+```
+
+### Example: Power Indicator
+
+```c
+void draw_lcd_indicator(SyncEmu* emu) {
+    int is_on = emu_is_lcd_on(emu);
+    printf("LCD: %s\n", is_on ? "ON" : "OFF");
+    
+    // Draw power indicator LED
+    draw_led(is_on ? GREEN : RED);
+}
+```
+
+---
+
+## emu_get_backlight
+
+Get the current backlight brightness level.
+
+```c
+uint8_t emu_get_backlight(const SyncEmu* emu);
+```
+
+### Parameters
+
+- **emu**: Pointer to emulator instance
+
+### Returns
+
+- **0-255**: Backlight brightness level (0 = off, 255 = maximum)
+- **0**: If emulator pointer is null
+
+### Description
+
+Returns the current backlight brightness level from the LCD controller. The value ranges from 0 (backlight off) to 255 (maximum brightness).
+
+The actual TI-84 Plus CE typically uses levels 0-100, but the hardware register is 8-bit.
+
+### Example: Apply Backlight
+
+```c
+void apply_backlight(SyncEmu* emu, uint32_t* display_buffer,
+                     int width, int height) {
+    uint8_t backlight = emu_get_backlight(emu);
+    float brightness = backlight / 255.0f;
+    
+    // Darken display based on backlight level
+    for (int i = 0; i < width * height; i++) {
+        uint32_t pixel = display_buffer[i];
+        uint8_t* p = (uint8_t*)&display_buffer[i];
+        
+        p[0] = (uint8_t)(p[0] * brightness);  // R
+        p[1] = (uint8_t)(p[1] * brightness);  // G
+        p[2] = (uint8_t)(p[2] * brightness);  // B
+    }
+}
+```
+
+### Example: Backlight Overlay
+
+```c
+// Show backlight level as overlay
+void draw_backlight_indicator(SyncEmu* emu) {
+    uint8_t level = emu_get_backlight(emu);
+    
+    printf("Backlight: %d/255 (%.1f%%)\n",
+           level, (level / 255.0f) * 100.0f);
+    
+    // Draw brightness bar
+    int bar_width = (level * 200) / 255;
+    draw_bar(10, 10, bar_width, 20, GREEN);
+}
+```
+
+### Example: Realistic Display Simulation
+
+```c
+void render_realistic_display(SyncEmu* emu, uint32_t* output) {
+    int32_t width, height;
+    const uint32_t* fb = emu_framebuffer(emu, &width, &height);
+    
+    // Check LCD power
+    if (!emu_is_lcd_on(emu)) {
+        // LCD off - show black screen with faint reflection
+        memset(output, 0x00101010, width * height * 4);
+        return;
+    }
+    
+    // Copy framebuffer
+    memcpy(output, fb, width * height * 4);
+    
+    // Apply backlight brightness
+    uint8_t backlight = emu_get_backlight(emu);
+    float brightness = backlight / 255.0f;
+    
+    // Add ambient light (screen is visible even with backlight off)
+    const float ambient = 0.05f;  // 5% ambient visibility
+    float total_brightness = ambient + (brightness * (1.0f - ambient));
+    
+    for (int i = 0; i < width * height; i++) {
+        uint8_t* p = (uint8_t*)&output[i];
+        p[0] = (uint8_t)(p[0] * total_brightness);
+        p[1] = (uint8_t)(p[1] * total_brightness);
+        p[2] = (uint8_t)(p[2] * total_brightness);
+    }
+}
+```
+
+---
+
+## Complete Display Example
+
+```c
+#include <SDL2/SDL.h>
+#include <stdio.h>
+#include <stdint.h>
+
+typedef struct {
+    SDL_Window* window;
+    SDL_Renderer* renderer;
+    SDL_Texture* texture;
+    uint32_t* buffer;
+    int width;
+    int height;
+} Display;
+
+Display* display_init(void) {
+    Display* d = malloc(sizeof(Display));
+    d->width = 320;
+    d->height = 240;
+    
+    SDL_Init(SDL_INIT_VIDEO);
+    
+    d->window = SDL_CreateWindow(
+        "TI-84 Plus CE",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        d->width * 2, d->height * 2,  // 2x scale
+        SDL_WINDOW_SHOWN
+    );
+    
+    d->renderer = SDL_CreateRenderer(d->window, -1,
+        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    
+    d->texture = SDL_CreateTexture(
+        d->renderer,
+        SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_STREAMING,
+        d->width, d->height
+    );
+    
+    d->buffer = malloc(d->width * d->height * sizeof(uint32_t));
+    
+    return d;
+}
+
+void display_render(Display* d, SyncEmu* emu) {
+    // Check if LCD is on
+    if (!emu_is_lcd_on(emu)) {
+        // Render black screen
+        memset(d->buffer, 0, d->width * d->height * 4);
+    } else {
+        // Get framebuffer
+        int32_t fb_width, fb_height;
+        const uint32_t* fb = emu_framebuffer(emu, &fb_width, &fb_height);
+        memcpy(d->buffer, fb, d->width * d->height * 4);
+        
+        // Apply backlight
+        uint8_t backlight = emu_get_backlight(emu);
+        float brightness = (backlight / 255.0f) * 0.95f + 0.05f;
+        
+        for (int i = 0; i < d->width * d->height; i++) {
+            uint8_t* p = (uint8_t*)&d->buffer[i];
+            p[0] = (uint8_t)(p[0] * brightness);
+            p[1] = (uint8_t)(p[1] * brightness);
+            p[2] = (uint8_t)(p[2] * brightness);
+        }
+    }
+    
+    // Render to screen
+    SDL_UpdateTexture(d->texture, NULL, d->buffer,
+                      d->width * sizeof(uint32_t));
+    SDL_RenderClear(d->renderer);
+    SDL_RenderCopy(d->renderer, d->texture, NULL, NULL);
+    SDL_RenderPresent(d->renderer);
+}
+
+void display_destroy(Display* d) {
+    free(d->buffer);
+    SDL_DestroyTexture(d->texture);
+    SDL_DestroyRenderer(d->renderer);
+    SDL_DestroyWindow(d->window);
+    free(d);
+    SDL_Quit();
+}
+```
+
+## See Also
+
+- [Execution](/api/execution) - Run cycles to update display
+- [C API Overview](/api/c-api-overview) - Thread safety considerations
+- [Lifecycle](/api/lifecycle) - Initialize emulator before display access
