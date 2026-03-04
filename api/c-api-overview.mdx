@@ -144,6 +144,25 @@ The API supports platform-specific symbol prefixes:
 
 This prevents symbol conflicts with other libraries on platforms with limited namespacing.
 
+## Backend Management (Optional)
+
+For dual-backend builds that support switching between Rust and CEmu at runtime, these functions are available:
+
+```c
+const char* emu_backend_get_available(void);  // Get comma-separated list
+const char* emu_backend_get_current(void);    // Get active backend name
+int emu_backend_set(const char* name);        // Switch backend (0=success, -1=failure)
+int emu_backend_count(void);                   // Get number of backends
+```
+
+For standard Rust-only builds:
+- `emu_backend_get_available()` returns `"rust"`
+- `emu_backend_get_current()` returns `"rust"`
+- `emu_backend_set("rust")` returns `0`, other names return `-1`
+- `emu_backend_count()` returns `1`
+
+See the [Dual Backend](/concepts/dual-backend) documentation for building with multiple backends.
+
 ## Next Steps
 
 - Learn about [lifecycle management](/api/lifecycle)

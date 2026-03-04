@@ -230,6 +230,57 @@ int main(void) {
 }
 ```
 
+---
+
+## emu_set_log_callback
+
+Set an optional log callback for emulator events.
+
+```c
+void emu_set_log_callback(void (*callback)(const char* message));
+```
+
+### Parameters
+
+- **callback**: Function pointer to log callback, or NULL to disable logging
+
+### Description
+
+Sets a callback function that will be invoked when the emulator generates log messages. The callback receives a null-terminated C string containing the log message.
+
+Pass NULL to disable logging.
+
+### Example
+
+```c
+#include <stdio.h>
+
+void my_log_handler(const char* message) {
+    printf("[EMU] %s\n", message);
+}
+
+int main() {
+    // Set up logging before creating emulator
+    emu_set_log_callback(my_log_handler);
+    
+    SyncEmu* emu = emu_create();
+    // Emulator events will now be logged via callback
+    
+    // Disable logging
+    emu_set_log_callback(NULL);
+    
+    emu_destroy(emu);
+    return 0;
+}
+```
+
+### Notes
+
+- The callback is global and applies to all emulator instances
+- The message pointer is only valid during the callback
+- The callback must be thread-safe if using multiple emulator instances
+- Logging can impact performance in tight loops
+
 ## See Also
 
 - [ROM Management](/api/rom-management) - Load ROM and send files
